@@ -4,6 +4,31 @@ A command line interface for WhatsApp, based on [go-whatsmeow](https://github.co
 
 ![whatscli-screenshot](/doc/screenshot.png?raw=true "WhatsCLI 0.6.5")
 
+> **Note:** this is a customized fork of [normen/whatscli](https://github.com/normen/whatscli) with a reworked look and several UX fixes — see [Changes in this fork](#changes-in-this-fork).
+
+## Changes in this fork
+
+Current version, on top of upstream v1.1.5:
+
+**Visual & theme**
+- New default "warm retro" theme (dark slate background, khaki borders, cream body text, teal self messages) defined in `config/theme.go`, selectable via `theme = warm` in the `[general]` config section
+- Strict one-color-per-role mapping with new color roles: `list_selected` (selected-chat block), `timestamp` (dim gray), `list_group` (groups now colored differently from accounts), `search_background`
+- Sender names in the transcript use a brighter yellow-green so they pop against the contact list
+
+**Chat list & search**
+- The Contacts sidebar now only lists chats with actual message activity — the long-dormant `chat_list_mode = recency_only` option is now honored, and the whole address book is no longer dumped into the list on login
+- Group members no longer leak into the chat list, and WhatsApp Status / broadcasts / newsletters are never shown or counted as recent chats
+- Contact & group search is now instant: fully in-memory instead of hitting the SQLite store and the WhatsApp network API on every keystroke
+- The search field has its own background color so it doesn't blend into the app background
+
+**Focus & help**
+- All four panels (search, contacts, messages, input) now show a clear focus indicator (sage highlight, bold labels, status-bar segment), for keyboard and mouse focus changes alike
+- Fixed the input/search labels disappearing (black-on-black) while the field was focused
+- `F1` / `/help` now toggles the help screen instead of wiping the current chat; the chat is restored when closing help
+
+**Config & fixes**
+- Fixed stale config files silently overriding theme colors on every start; the loaded config file path is printed at startup
+
 ## Features
 
 Things that work.
