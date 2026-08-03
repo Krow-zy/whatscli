@@ -1,6 +1,9 @@
 package messages
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDownloadFileNameSanitizesPathTraversal(t *testing.T) {
 	msg := Message{
@@ -36,6 +39,40 @@ func TestDownloadFileNameFallsBackForInvalidName(t *testing.T) {
 	got := downloadFileName(msg)
 	if got != "msg-3.png" {
 		t.Fatalf("expected fallback filename, got %q", got)
+	}
+}
+
+func TestChatIsMuted(t *testing.T) {
+	if (Chat{MutedUntil: 0}).IsMuted() {
+		t.Fatalf("unmuted chat reported muted")
+	}
+	if !(Chat{MutedUntil: -1}).IsMuted() {
+		t.Fatalf("forever mute not detected")
+	}
+	if !(Chat{MutedUntil: time.Now().Unix() + 3600}).IsMuted() {
+		t.Fatalf("future mute not detected")
+	}
+	if (Chat{MutedUntil: time.Now().Unix() - 3600}).IsMuted() {
+		t.Fatalf("expired mute still active")
+	}
+}
+
+func TestSetChatMutedSurvivesAddChatMerge(t *testing.T) {
+	md := &MessageDatabase{}
+	md.Init()
+	md.AddChat(Chat{Id: "111@s.whatsapp.net", Name: "A"})
+	md.SetChatMuted("111@s.whatsapp.net", -1)
+	md.AddChat(Chat{Id: "111@s.whatsapp.net", Name: "A"})
+
+	chat, ok := md.GetChat("111@s.whatsapp.net")
+	if !ok || !chat.IsMuted() {
+		t.Fatalf("mute state lost on AddChat merge")
+	}
+
+	md.SetChatMuted("111@s.whatsapp.net", 0)
+	chat, _ = md.GetChat("111@s.whatsapp.net")
+	if chat.IsMuted() {
+		t.Fatalf("unmute did not apply")
 	}
 }
 

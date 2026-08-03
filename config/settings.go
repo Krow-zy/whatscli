@@ -126,7 +126,6 @@ func InitConfig() {
 	var err error
 	ApplyTheme(RetroTheme())
 	if configFilePath, err = xdg.ConfigFile("whatscli/whatscli.config"); err == nil {
-		var cfg *ini.File
 		if cfg, err = ini.Load(configFilePath); err == nil {
 			fmt.Println("Loaded config:", configFilePath)
 			cfg.NameMapper = ini.TitleUnderscore
@@ -162,6 +161,20 @@ func InitConfig() {
 }
 
 func GetConfigFilePath() string { return configFilePath }
+
+// SaveNotifications toggles notifications and persists the setting to the config file.
+func SaveNotifications(enabled bool) {
+	Config.General.EnableNotifications = enabled
+	if cfg == nil {
+		return
+	}
+	if section, err := cfg.GetSection("general"); err == nil {
+		section.Key("enable_notifications").SetValue(fmt.Sprintf("%v", enabled))
+		if err = cfg.SaveTo(configFilePath); err != nil {
+			fmt.Print(err.Error())
+		}
+	}
+}
 
 func GetSessionFilePath() string {
 	if sessionFilePath, err := xdg.ConfigFile("whatscli/session"); err == nil {

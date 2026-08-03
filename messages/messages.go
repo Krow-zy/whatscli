@@ -1,8 +1,9 @@
-//this package manages the messages
+// this package manages the messages
 package messages
 
 import (
 	"io"
+	"time"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 )
@@ -27,6 +28,7 @@ type SessionStatus struct {
 	BatteryPowersave bool
 	Connected        bool
 	LastSeen         string
+	ContactPresence  string
 }
 
 // message struct for battery messages
@@ -86,6 +88,14 @@ type Chat struct {
 	Unread  int
 	//TODO: convert to uint64
 	LastMessage int64
+	// MutedUntil is 0 when not muted, -1 when muted forever,
+	// or the unix timestamp when the mute expires.
+	MutedUntil int64
+}
+
+// IsMuted reports whether the chat is currently muted in WhatsApp.
+func (c Chat) IsMuted() bool {
+	return c.MutedUntil < 0 || c.MutedUntil > time.Now().Unix()
 }
 
 type Contact struct {

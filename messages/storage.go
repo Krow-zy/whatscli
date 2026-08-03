@@ -133,8 +133,34 @@ func (md *MessageDatabase) AddChat(chat Chat) {
 		if chat.Unread < existing.Unread {
 			chat.Unread = existing.Unread
 		}
+		// A zero MutedUntil makes no claim — keep the known mute state.
+		if chat.MutedUntil == 0 {
+			chat.MutedUntil = existing.MutedUntil
+		}
 	}
 	md.chats[chat.Id] = chat
+}
+
+// SetChatMuted authoritatively sets the mute state of a chat
+// (0 = not muted, -1 = muted forever, else mute expiry timestamp).
+func (md *MessageDatabase) SetChatMuted(chatID string, until int64) {
+	md.chatLock.Lock()
+	defer md.chatLock.Unlock()
+
+	chat, ok := md.chats[chatID]
+	if !ok {
+		chat = Chat{Id: chatID, IsGroup: strings.Contains(chatID, GROUPSUFFIX)}
+	}
+	chat.MutedUntil = until
+	md.chats[chatID] = chat
+}
+
+// GetChat returns a single chat by ID.
+func (md *MessageDatabase) GetChat(chatID string) (Chat, bool) {
+	md.chatLock.RLock()
+	defer md.chatLock.RUnlock()
+	chat, ok := md.chats[chatID]
+	return chat, ok
 }
 
 // UpdateChatUnread syncs unread counts from external sources such as history sync.

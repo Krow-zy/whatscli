@@ -126,6 +126,14 @@ func (sm *SessionManager) runManager() error {
 
 func (sm *SessionManager) setCurrentReceiver(id string) {
 	sm.currentReceiver = id
+	sm.statusInfo.ContactPresence = ""
+	if sm.client != nil && sm.client.IsConnected() && strings.HasSuffix(id, CONTACTSUFFIX) {
+		if jid, err := types.ParseJID(id); err == nil {
+			if err = sm.client.SubscribePresence(context.Background(), jid); err != nil {
+				sm.uiHandler.PrintError(fmt.Errorf("presence subscription failed: %v", err))
+			}
+		}
+	}
 	sm.uiHandler.NewScreen(sm.getMessages(id))
 }
 
@@ -366,6 +374,13 @@ func (sm *SessionManager) execCommand(command Command) {
 		}
 	case "reset":
 		sm.resetSession()
+	case "notifications":
+		config.SaveNotifications(!config.Config.General.EnableNotifications)
+		if config.Config.General.EnableNotifications {
+			sm.uiHandler.PrintText("desktop notifications enabled (saved to config)")
+		} else {
+			sm.uiHandler.PrintText("desktop notifications disabled (saved to config)")
+		}
 	case "disconnect":
 		sm.uiHandler.PrintError(sm.disconnect())
 	case "logout":
@@ -953,6 +968,11 @@ func (sm *SessionManager) outgoingMessageFromSendResponse(resp whatsmeow.SendRes
 	}
 }
 
+func (sm *SessionManager) chatMuted(chatID string) bool {
+	chat, ok := sm.db.GetChat(chatID)
+	return ok && chat.IsMuted()
+}
+
 func notify(title, message string) error {
 	if !config.Config.General.EnableNotifications {
 		return nil
@@ -980,7 +1000,47 @@ func (eh *eventHandler) Handle(evt interface{}) {
 	case *events.LoggedOut:
 		eh.sm.StatusChannel <- StatusMsg{false, nil}
 		eh.sm.uiHandler.PrintText("Logged out: " + fmt.Sprintf("%v", v.Reason))
+	case *events.Mute:
+		eh.handleMuteEvent(v)
+	case *events.Presence:
+		eh.handlePresenceEvent(v)
 	}
+}
+
+// handleMuteEvent syncs chat mutes made on other devices (0 = unmuted,
+// -1 = muted forever, else mute expiry timestamp).
+func (eh *eventHandler) handleMuteEvent(evt *events.Mute) {
+	if evt == nil || evt.Action == nil {
+		return
+	}
+	until := int64(0)
+	if evt.Action.GetMuted() {
+		until = evt.Action.GetMuteEndTimestamp()
+		if until == 0 {
+			until = -1
+		}
+	}
+	eh.sm.db.SetChatMuted(evt.JID.String(), until)
+}
+
+// handlePresenceEvent tracks the online status of the currently open chat.
+func (eh *eventHandler) handlePresenceEvent(evt *events.Presence) {
+	if evt == nil || eh.sm.currentReceiver == "" {
+		return
+	}
+	if evt.From.String() != eh.sm.currentReceiver {
+		return
+	}
+	if evt.Unavailable {
+		if evt.LastSeen.IsZero() {
+			eh.sm.statusInfo.ContactPresence = "offline"
+		} else {
+			eh.sm.statusInfo.ContactPresence = "last seen " + evt.LastSeen.Format("15:04")
+		}
+	} else {
+		eh.sm.statusInfo.ContactPresence = "online"
+	}
+	eh.sm.uiHandler.SetStatus(eh.sm.statusInfo)
 }
 
 func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
@@ -1008,7 +1068,7 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 		} else {
 			eh.sm.uiHandler.NewScreen(eh.sm.getMessages(msg.ChatId))
 		}
-	} else if markUnread && msg.Timestamp > uint64(time.Now().Unix()-30) {
+	} else if markUnread && !eh.sm.chatMuted(msg.ChatId) && msg.Timestamp > uint64(time.Now().Unix()-30) {
 		if err := notify(msg.ContactShort, msg.Text); err != nil {
 			eh.sm.uiHandler.PrintError(err)
 		}
@@ -1053,6 +1113,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			Name:        chatName,
 			Unread:      int(conv.GetUnreadCount()),
 			LastMessage: lastMessage,
+			MutedUntil:  int64(conv.GetMuteEndTime()),
 		})
 
 		for _, histMsg := range conv.GetMessages() {
@@ -1445,7 +1506,6 @@ func chatMatches(chat Chat, needle string) bool {
 	}
 	return strings.Contains(strings.ToLower(chat.Id), needle)
 }
-
 
 func unwrapMessage(msg *waProto.Message) *waProto.Message {
 	for msg != nil {
