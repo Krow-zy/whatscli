@@ -10,20 +10,24 @@ import (
 
 func TestChatPanelNavigationWraps(t *testing.T) {
 	chatRoot = tview.NewTreeNode("Chats").SetExpanded(true)
+	contacts := tview.NewTreeNode("Contacts").SetSelectable(false).SetExpanded(true)
+	groups := tview.NewTreeNode("Groups").SetSelectable(false).SetExpanded(true)
 	first := tview.NewTreeNode("A")
 	second := tview.NewTreeNode("B")
-	chatRoot.AddChild(first)
-	chatRoot.AddChild(second)
+	contacts.AddChild(first)
+	groups.AddChild(second)
+	chatRoot.AddChild(contacts)
+	chatRoot.AddChild(groups)
 	treeView = tview.NewTreeView().SetRoot(chatRoot).SetCurrentNode(first)
 
 	handleChatPanelUp(nil)
 	if treeView.GetCurrentNode() != second {
-		t.Fatalf("expected wrap to last node")
+		t.Fatalf("expected wrap across sections to last node")
 	}
 
 	handleChatPanelDown(nil)
 	if treeView.GetCurrentNode() != first {
-		t.Fatalf("expected wrap to first node")
+		t.Fatalf("expected wrap across sections to first node")
 	}
 }
 

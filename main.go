@@ -35,7 +35,7 @@ var infoBar *tview.TextView
 var chatRoot *tview.TreeNode
 var app *tview.Application
 var sidebarFlex *tview.Flex
-var sidebarTitle string = "Contacts"
+var sidebarTitle string = "Chats"
 var searchMode bool = false
 var helpVisible bool = false
 var searchResults []messages.Chat
@@ -233,7 +233,11 @@ func MakeTree() *tview.TreeView {
 	treeView.SetChangedFunc(func(node *tview.TreeNode) {
 		reference := node.GetReference()
 		if reference == nil {
-			SetDisplayedChat(messages.Chat{})
+			// Category/header nodes have no chat reference — just fold them.
+			if node == chatRoot {
+				return
+			}
+			node.SetExpanded(!node.IsExpanded())
 			return
 		}
 		children := node.GetChildren()
@@ -360,42 +364,42 @@ func handleMessagesMove(amount int) func(ev *tcell.EventKey) *tcell.EventKey {
 	}
 }
 func handleChatPanelUp(ev *tcell.EventKey) *tcell.EventKey {
-	children := chatRoot.GetChildren()
-	if len(children) == 0 {
+	nodes := sidebarChatNodes()
+	if len(nodes) == 0 {
 		return nil
 	}
 	current := treeView.GetCurrentNode()
 	idx := 0
-	for i, n := range children {
+	for i, n := range nodes {
 		if n == current {
 			idx = i
 			break
 		}
 	}
 	if idx > 0 {
-		treeView.SetCurrentNode(children[idx-1])
+		treeView.SetCurrentNode(nodes[idx-1])
 	} else {
-		treeView.SetCurrentNode(children[len(children)-1])
+		treeView.SetCurrentNode(nodes[len(nodes)-1])
 	}
 	return nil
 }
 func handleChatPanelDown(ev *tcell.EventKey) *tcell.EventKey {
-	children := chatRoot.GetChildren()
-	if len(children) == 0 {
+	nodes := sidebarChatNodes()
+	if len(nodes) == 0 {
 		return nil
 	}
 	current := treeView.GetCurrentNode()
 	idx := -1
-	for i, n := range children {
+	for i, n := range nodes {
 		if n == current {
 			idx = i
 			break
 		}
 	}
-	if idx >= 0 && idx < len(children)-1 {
-		treeView.SetCurrentNode(children[idx+1])
+	if idx >= 0 && idx < len(nodes)-1 {
+		treeView.SetCurrentNode(nodes[idx+1])
 	} else {
-		treeView.SetCurrentNode(children[0])
+		treeView.SetCurrentNode(nodes[0])
 	}
 	return nil
 }
@@ -449,21 +453,25 @@ func applyChatSearch(query string) {
 	}
 	searchMode = true
 	searchResults = sessionManager.ResolveSearchChats(trimmed)
-	renderChatNodes(searchResults, "Contacts")
+	renderChatNodes(searchResults, "Chats")
 	if len(searchResults) > 0 {
-		treeView.SetCurrentNode(chatRoot.GetChildren()[0])
+		if nodes := sidebarChatNodes(); len(nodes) > 0 {
+			treeView.SetCurrentNode(nodes[0])
+		}
 	}
 }
 func clearChatSearch() {
 	searchMode = false
 	searchResults = nil
-	renderChatNodes(sessionManager.GetKnownChats(), "Contacts")
+	renderChatNodes(sessionManager.GetKnownChats(), "Chats")
 }
 func renderChatNodes(ids []messages.Chat, title string) {
 	sidebarTitle = title
 	chatRoot.SetText(title)
 	chatRoot.ClearChildren()
 	oldId := currentReceiver.Id
+	contactsRoot := tview.NewTreeNode("[::b]Contacts[-::-]").SetSelectable(false).SetExpanded(true)
+	groupsRoot := tview.NewTreeNode("[::b]Groups[-::-]").SetSelectable(false).SetExpanded(true)
 	for _, element := range ids {
 		if element.Id == messages.STATUSSUFFIX {
 			continue
@@ -487,11 +495,30 @@ func renderChatNodes(ids []messages.Chat, title string) {
 		if element.Id == oldId {
 			currentReceiver = element
 		}
-		chatRoot.AddChild(node)
+		if element.IsGroup {
+			groupsRoot.AddChild(node)
+		} else {
+			contactsRoot.AddChild(node)
+		}
 		if element.Id == currentReceiver.Id {
 			treeView.SetCurrentNode(node)
 		}
 	}
+	if len(contactsRoot.GetChildren()) > 0 {
+		chatRoot.AddChild(contactsRoot)
+	}
+	if len(groupsRoot.GetChildren()) > 0 {
+		chatRoot.AddChild(groupsRoot)
+	}
+}
+
+// sidebarChatNodes returns the selectable chat nodes across all sidebar sections.
+func sidebarChatNodes() []*tview.TreeNode {
+	nodes := []*tview.TreeNode{}
+	for _, category := range chatRoot.GetChildren() {
+		nodes = append(nodes, category.GetChildren()...)
+	}
+	return nodes
 }
 
 func LoadShortcuts() {
@@ -608,6 +635,7 @@ func PrintCommands() {
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"logout[::-] = Remove login data from computer")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"reset[::-] = Remove stored session and reconnect cleanly")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"quit [::-]or[::b] "+config.Config.Keymap.CommandQuit+"[::-] = Exit app")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"notifications[::-] = toggle desktop notifications on/off (saved to config)")
 	fmt.Fprintln(textView, "Chat")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"backlog [::-]or[::b] "+config.Config.Keymap.CommandBacklog+"[::-] = load next "+fmt.Sprint(config.Config.General.BacklogMsgQuantity)+" previous messages")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"read [::-]or[::b] "+config.Config.Keymap.CommandRead+"[::-] = mark new messages in chat as read")
@@ -721,9 +749,9 @@ func PrintImage(path string) {
 func UpdateStatusBar(statusInfo messages.SessionStatus) {
 	out := " "
 	if statusInfo.Connected {
-		out += "[" + config.Config.Colors.Positive + "]online[-]"
+		out += "[::d]app:[::-] [" + config.Config.Colors.Positive + "]online[-]"
 	} else {
-		out += "[" + config.Config.Colors.Negative + "]offline[-]"
+		out += "[::d]app:[::-] [" + config.Config.Colors.Negative + "]offline[-]"
 	}
 	out += " [::d](" + fmt.Sprint(statusInfo.BatteryCharge) + "%"
 	if statusInfo.BatteryLoading {
@@ -739,6 +767,11 @@ func UpdateStatusBar(statusInfo messages.SessionStatus) {
 	out += ")[::-] " + statusInfo.LastSeen
 	if currentReceiver.Name != "" {
 		out += " [::d]chat:[::-] " + currentReceiver.Name
+		if statusInfo.ContactPresence == "online" {
+			out += " · [" + config.Config.Colors.Positive + "]" + statusInfo.ContactPresence + "[-]"
+		} else if statusInfo.ContactPresence != "" {
+			out += " · [::d]" + statusInfo.ContactPresence + "[::-]"
+		}
 	}
 	focusLabel := ""
 	if chatSearchInput != nil && chatSearchInput.HasFocus() {
@@ -762,7 +795,7 @@ func UpdateStatusBar(statusInfo messages.SessionStatus) {
 func applyFocusVisuals() {
 	if textInput != nil {
 		textInput.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
-		textInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.Background))
+		textInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.SearchBackground))
 		textInput.SetFieldTextColor(uiColor(config.Config.Colors.Text))
 	}
 	if chatSearchInput != nil {
@@ -847,9 +880,9 @@ func (u UiHandler) NewScreen(msgs []messages.Message) {
 func (u UiHandler) SetChats(ids []messages.Chat) {
 	go app.QueueUpdateDraw(func() {
 		if searchMode {
-			renderChatNodes(searchResults, "Contacts")
+			renderChatNodes(searchResults, "Chats")
 		} else {
-			renderChatNodes(ids, "Contacts")
+			renderChatNodes(ids, "Chats")
 		}
 	})
 }

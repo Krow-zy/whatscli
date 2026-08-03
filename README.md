@@ -18,8 +18,15 @@ Current version, on top of upstream v1.1.5:
 **Chat list & search**
 - The Contacts sidebar now only lists chats with actual message activity — the long-dormant `chat_list_mode = recency_only` option is now honored, and the whole address book is no longer dumped into the list on login
 - Group members no longer leak into the chat list, and WhatsApp Status / broadcasts / newsletters are never shown or counted as recent chats
+- The sidebar is split into collapsible **Contacts** and **Groups** sections, so contacts are never buried under busier groups
 - Contact & group search is now instant: fully in-memory instead of hitting the SQLite store and the WhatsApp network API on every keystroke
 - The search field has its own background color so it doesn't blend into the app background
+
+**Notifications & presence**
+- Desktop notifications (Windows toast) for incoming messages, toggled at runtime with `/notifications` (persisted to the config file)
+- Notifications respect WhatsApp's mute setting — muted chats never pop up, and mute changes from your phone sync live
+- Online presence for the currently open chat: the status bar shows `online` / `last seen` next to the chat name
+- The connection indicator is relabeled to `app: online/offline` so it's clearly about your own connection, not the contact's
 
 **Focus & help**
 - All four panels (search, contacts, messages, input) now show a clear focus indicator (sage highlight, bold labels, status-bar segment), for keyboard and mouse focus changes alike
