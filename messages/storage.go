@@ -90,10 +90,10 @@ func (md *MessageDatabase) updateChatFromMessageLocked(msg Message, markUnread b
 		chat = Chat{
 			Id:      msg.ChatId,
 			IsGroup: strings.Contains(msg.ChatId, GROUPSUFFIX),
-			Name:    msg.ContactName,
+			Name:    "",
 		}
 	}
-	if chat.Name == "" {
+	if chat.Name == "" && !chat.IsGroup {
 		chat.Name = msg.ContactName
 	}
 	if int64(msg.Timestamp) > chat.LastMessage {
@@ -124,7 +124,7 @@ func (md *MessageDatabase) AddChat(chat Chat) {
 
 	existing, ok := md.chats[chat.Id]
 	if ok {
-		if chat.Name == "" {
+		if chat.Name == "" && !chat.IsGroup {
 			chat.Name = existing.Name
 		}
 		if chat.LastMessage < existing.LastMessage {
@@ -243,6 +243,18 @@ func (md *MessageDatabase) AddContact(contact Contact) {
 		}
 	}
 	md.contacts[contact.Id] = contact
+}
+
+// GetAllContacts returns all known contacts.
+func (md *MessageDatabase) GetAllContacts() []Contact {
+	md.contactLock.RLock()
+	defer md.contactLock.RUnlock()
+
+	out := make([]Contact, 0, len(md.contacts))
+	for _, contact := range md.contacts {
+		out = append(out, contact)
+	}
+	return out
 }
 
 // GetChatIds returns chats sorted by most recent message first.
