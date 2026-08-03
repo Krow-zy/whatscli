@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,16 +28,20 @@ var curRegions []messages.Message
 var textView *tview.TextView
 var treeView *tview.TreeView
 var textInput *tview.InputField
+var chatSearchInput *tview.InputField
 var topBar *tview.TextView
 var infoBar *tview.TextView
 
 var chatRoot *tview.TreeNode
 var app *tview.Application
+var sidebarFlex *tview.Flex
+var sidebarTitle string = "Contacts"
+var searchMode bool = false
+var helpVisible bool = false
+var searchResults []messages.Chat
 
 var sessionManager *messages.SessionManager
-
 var keyBindings *cbind.Configuration
-
 var uiHandler messages.UiMessageHandler
 
 func main() {
@@ -45,81 +51,102 @@ func main() {
 	sessionManager.Init(uiHandler)
 
 	app = tview.NewApplication()
-
-	sideBarWidth := config.Config.Ui.ChatSidebarWidth
+	setTviewTheme()
 	gridLayout := tview.NewGrid()
 	gridLayout.SetRows(1, 0, 1)
-	gridLayout.SetColumns(sideBarWidth, 0, sideBarWidth)
+	gridLayout.SetColumns(config.Config.Ui.ChatSidebarWidth, 0, config.Config.Ui.ChatSidebarWidth)
 	gridLayout.SetBorders(true)
-	gridLayout.SetBackgroundColor(tcell.ColorNames[config.Config.Colors.Background])
-	gridLayout.SetBordersColor(tcell.ColorNames[config.Config.Colors.Borders])
+	gridLayout.SetBackgroundColor(uiColor(config.Config.Colors.Background))
+	gridLayout.SetBordersColor(uiColor(config.Config.Colors.Borders))
 
 	cmdPrefix := config.Config.General.CmdPrefix
 	topBar = tview.NewTextView()
 	topBar.SetDynamicColors(true)
 	topBar.SetScrollable(false)
-	topBar.SetText("[::b] WhatsCLI " + VERSION + "  [-::d]Type " + cmdPrefix + "help or press " + config.Config.Keymap.CommandHelp + " for help")
-	topBar.SetBackgroundColor(tcell.ColorNames[config.Config.Colors.Background])
+	topBar.SetText("[" + config.Config.Colors.ListHeader + "::b]WhatsCLI " + VERSION + "[-::-]  [" + config.Config.Colors.Text + "::d]Type " + cmdPrefix + "help for help[-::-]")
+	topBar.SetBackgroundColor(uiColor(config.Config.Colors.Background))
 
 	infoBar = tview.NewTextView()
 	infoBar.SetDynamicColors(true)
 	UpdateStatusBar(messages.SessionStatus{})
 
-	textView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetRegions(true).
-		SetWordWrap(true).
-		SetChangedFunc(func() {
-			app.Draw()
-		})
-	textView.SetBackgroundColor(tcell.ColorNames[config.Config.Colors.Background])
-	textView.SetTextColor(tcell.ColorNames[config.Config.Colors.Text])
-
-	PrintHelp()
+	textView = tview.NewTextView().SetDynamicColors(true).SetRegions(true).SetWordWrap(true).SetChangedFunc(func() { app.Draw() })
+	textView.SetBackgroundColor(uiColor(config.Config.Colors.Background))
+	textView.SetTextColor(uiColor(config.Config.Colors.Text))
 
 	textInput = tview.NewInputField()
-	textInput.SetBackgroundColor(tcell.ColorNames[config.Config.Colors.Background])
-	textInput.SetFieldBackgroundColor(tcell.ColorNames[config.Config.Colors.InputBackground])
-	textInput.SetFieldTextColor(tcell.ColorNames[config.Config.Colors.InputText])
-	textInput.SetChangedFunc(func(change string) {
-		sndTxt = change
-	})
+	textInput.SetLabel("Reply: ")
+	textInput.SetBackgroundColor(uiColor(config.Config.Colors.Background))
+	textInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.InputBackground))
+	textInput.SetFieldTextColor(uiColor(config.Config.Colors.InputText))
+	textInput.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
+	textInput.SetChangedFunc(func(change string) { sndTxt = change })
 	textInput.SetDoneFunc(EnterCommand)
 	textInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyDown {
 			offset, _ := textView.GetScrollOffset()
-			offset += 1
-			textView.ScrollTo(offset, 0)
+			textView.ScrollTo(offset+1, 0)
 			return nil
 		}
 		if event.Key() == tcell.KeyUp {
 			offset, _ := textView.GetScrollOffset()
-			offset -= 1
-			textView.ScrollTo(offset, 0)
+			textView.ScrollTo(offset-1, 0)
 			return nil
 		}
 		if event.Key() == tcell.KeyPgDn {
 			offset, _ := textView.GetScrollOffset()
-			offset += 10
-			textView.ScrollTo(offset, 0)
+			textView.ScrollTo(offset+10, 0)
 			return nil
 		}
 		if event.Key() == tcell.KeyPgUp {
 			offset, _ := textView.GetScrollOffset()
-			offset -= 10
-			textView.ScrollTo(offset, 0)
+			textView.ScrollTo(offset-10, 0)
 			return nil
 		}
 		return event
 	})
 
+	chatSearchInput = tview.NewInputField()
+	chatSearchInput.SetLabel("Search: ")
+	chatSearchInput.SetBackgroundColor(uiColor(config.Config.Colors.Background))
+	chatSearchInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.SearchBackground))
+	chatSearchInput.SetFieldTextColor(uiColor(config.Config.Colors.Text))
+	chatSearchInput.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
+	chatSearchInput.SetChangedFunc(func(change string) { applyChatSearch(change) })
+	chatSearchInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			chatSearchInput.SetText("")
+			clearChatSearch()
+			app.SetFocus(treeView)
+			return nil
+		}
+		if event.Key() == tcell.KeyEnter {
+			handleOpenChat(event)
+			return nil
+		}
+		return event
+	})
+
+	sidebarFlex = tview.NewFlex().SetDirection(tview.FlexRow)
+	sidebarFlex.AddItem(chatSearchInput, 1, 0, false)
+	sidebarFlex.AddItem(MakeTree(), 0, 1, false)
+
 	gridLayout.AddItem(topBar, 0, 0, 1, 4, 0, 0, false)
 	gridLayout.AddItem(infoBar, 2, 0, 1, 1, 0, 0, false)
-	gridLayout.AddItem(MakeTree(), 1, 0, 1, 1, 0, 0, false)
+	gridLayout.AddItem(sidebarFlex, 1, 0, 1, 1, 0, 0, false)
 	gridLayout.AddItem(textView, 1, 1, 1, 3, 0, 0, false)
 	gridLayout.AddItem(textInput, 2, 1, 1, 3, 0, 0, false)
 
+	PrintHelp()
 	app.SetRoot(gridLayout, true)
+	if os.Getenv("WHATSCLI_DEBUG_BG") == "1" {
+		app.SetRoot(makeDebugBackgroundView(), true)
+	}
+	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		applyFocusVisuals()
+		fillScreen(screen, uiColor(config.Config.Colors.Background))
+		return false
+	})
 	app.EnableMouse(true)
 	app.SetFocus(textInput)
 	if err := sessionManager.StartManager(); err != nil {
@@ -129,30 +156,90 @@ func main() {
 	app.Run()
 }
 
-// creates the TreeView for chats
-func MakeTree() *tview.TreeView {
-	rootDir := "Chats"
-	chatRoot = tview.NewTreeNode(rootDir).
-		SetColor(tcell.ColorNames[config.Config.Colors.ListHeader])
-	treeView = tview.NewTreeView().
-		SetRoot(chatRoot).
-		SetCurrentNode(chatRoot)
-	treeView.SetBackgroundColor(tcell.ColorNames[config.Config.Colors.Background])
+func makeDebugBackgroundView() tview.Primitive {
+	bg := uiColor(config.Config.Colors.Background)
+	pages := tview.NewFlex().SetDirection(tview.FlexRow)
+	pages.AddItem(debugBlock("WHITE TEST", tcell.ColorWhite, tcell.ColorBlack), 0, 1, false)
+	pages.AddItem(debugBlock("RED TEST", tcell.ColorRed, tcell.ColorBlack), 0, 1, false)
+	pages.AddItem(debugBlock("GREEN TEST", tcell.ColorGreen, tcell.ColorBlack), 0, 1, false)
+	pages.AddItem(debugBlock("BLUE TEST", tcell.ColorBlue, tcell.ColorWhite), 0, 1, false)
+	pages.AddItem(debugBlock("APP BG TEST", bg, uiColor(config.Config.Colors.Text)), 0, 1, false)
+	pages.AddItem(debugBlock("INPUT BG TEST", uiColor(config.Config.Colors.InputBackground), uiColor(config.Config.Colors.InputText)), 0, 1, false)
+	return pages
+}
 
-	// If a chat was selected, open it.
+func debugBlock(label string, bg, fg tcell.Color) *tview.TextView {
+	v := tview.NewTextView().SetDynamicColors(false)
+	v.SetTextAlign(tview.AlignCenter)
+	v.SetBackgroundColor(bg)
+	v.SetTextColor(fg)
+	v.SetText("\n" + label + "\n")
+	return v
+}
+
+func setTviewTheme() {
+	bg := uiColor(config.Config.Colors.Background)
+	border := uiColor(config.Config.Colors.Borders)
+	text := uiColor(config.Config.Colors.Text)
+	accent := uiColor(config.Config.Colors.ListContact)
+	fill := uiColor(config.Config.Colors.InputBackground)
+	inverse := uiColor(config.Config.Colors.InputText)
+	tview.Styles.PrimitiveBackgroundColor = bg
+	tview.Styles.ContrastBackgroundColor = fill
+	tview.Styles.MoreContrastBackgroundColor = fill
+	tview.Styles.BorderColor = border
+	tview.Styles.TitleColor = text
+	tview.Styles.GraphicsColor = border
+	tview.Styles.PrimaryTextColor = text
+	tview.Styles.SecondaryTextColor = accent
+	tview.Styles.TertiaryTextColor = accent
+	tview.Styles.InverseTextColor = inverse
+	tview.Styles.ContrastSecondaryTextColor = inverse
+}
+
+func fillScreen(screen tcell.Screen, color tcell.Color) {
+	w, h := screen.Size()
+	style := tcell.StyleDefault.Background(color).Foreground(color)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			screen.SetContent(x, y, ' ', nil, style)
+		}
+	}
+}
+
+func uiColor(name string) tcell.Color {
+	if strings.HasPrefix(name, "#") && len(name) == 7 {
+		return tcell.NewHexColor(int32((parseHexByte(name[1:3]) << 16) | (parseHexByte(name[3:5]) << 8) | parseHexByte(name[5:7]))).TrueColor()
+	}
+	if c, ok := tcell.ColorNames[strings.ToLower(name)]; ok {
+		return c
+	}
+	return tcell.ColorWhite
+}
+
+func parseHexByte(s string) int64 {
+	v, err := strconv.ParseInt(s, 16, 32)
+	if err != nil {
+		return 255
+	}
+	return v
+}
+
+func MakeTree() *tview.TreeView {
+	chatRoot = tview.NewTreeNode(sidebarTitle).SetColor(uiColor(config.Config.Colors.ListHeader)).SetExpanded(true)
+	treeView = tview.NewTreeView().SetRoot(chatRoot).SetCurrentNode(chatRoot)
+	treeView.SetBackgroundColor(uiColor(config.Config.Colors.Background))
+	treeView.SetGraphicsColor(uiColor(config.Config.Colors.Borders))
 	treeView.SetChangedFunc(func(node *tview.TreeNode) {
 		reference := node.GetReference()
 		if reference == nil {
-			SetDisplayedChat(messages.Chat{"", false, "", 0, 0})
-			return // Selecting the root node does nothing.
+			SetDisplayedChat(messages.Chat{})
+			return
 		}
 		children := node.GetChildren()
 		if len(children) == 0 {
-			// Load and show files in this directory.
-			recv := reference.(messages.Chat)
-			SetDisplayedChat(recv)
+			SetDisplayedChat(reference.(messages.Chat))
 		} else {
-			// Collapse if visible, expand if collapsed.
 			node.SetExpanded(!node.IsExpanded())
 		}
 	})
@@ -162,39 +249,41 @@ func MakeTree() *tview.TreeView {
 func handleFocusMessage(ev *tcell.EventKey) *tcell.EventKey {
 	if !textView.HasFocus() {
 		app.SetFocus(textView)
-		if curRegions != nil && len(curRegions) > 0 {
+		if len(curRegions) > 0 {
 			textView.Highlight(curRegions[len(curRegions)-1].Id)
 		}
 	}
+	UpdateStatusBar(messages.SessionStatus{})
 	return nil
 }
-
 func handleFocusInput(ev *tcell.EventKey) *tcell.EventKey {
 	ResetMsgSelection()
 	if !textInput.HasFocus() {
 		app.SetFocus(textInput)
 	}
+	UpdateStatusBar(messages.SessionStatus{})
 	return nil
 }
-
 func handleFocusContacts(ev *tcell.EventKey) *tcell.EventKey {
 	ResetMsgSelection()
 	if !treeView.HasFocus() {
 		app.SetFocus(treeView)
 	}
+	UpdateStatusBar(messages.SessionStatus{})
 	return nil
 }
-
 func handleSwitchPanels(ev *tcell.EventKey) *tcell.EventKey {
 	ResetMsgSelection()
-	if !textInput.HasFocus() {
+	if chatSearchInput.HasFocus() {
+		app.SetFocus(treeView)
+	} else if treeView.HasFocus() {
 		app.SetFocus(textInput)
 	} else {
-		app.SetFocus(treeView)
+		app.SetFocus(chatSearchInput)
 	}
+	UpdateStatusBar(messages.SessionStatus{})
 	return nil
 }
-
 func handleCommand(command string) func(ev *tcell.EventKey) *tcell.EventKey {
 	return func(ev *tcell.EventKey) *tcell.EventKey {
 		sessionManager.CommandChannel <- messages.Command{command, nil}
@@ -226,7 +315,6 @@ func handlePasteUser(ev *tcell.EventKey) *tcell.EventKey {
 	}
 	return nil
 }
-
 func safeReadClipboard() (clip string, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -235,18 +323,12 @@ func safeReadClipboard() (clip string, err error) {
 	}()
 	return clipboard.ReadAll("clipboard")
 }
-
 func handleQuit(ev *tcell.EventKey) *tcell.EventKey {
 	sessionManager.CommandChannel <- messages.Command{"disconnect", nil}
 	app.Stop()
 	return nil
 }
-
-func handleHelp(ev *tcell.EventKey) *tcell.EventKey {
-	PrintHelp()
-	return nil
-}
-
+func handleHelp(ev *tcell.EventKey) *tcell.EventKey { ToggleHelp(); return nil }
 func handleMessageCommand(command string) func(ev *tcell.EventKey) *tcell.EventKey {
 	return func(ev *tcell.EventKey) *tcell.EventKey {
 		hls := textView.GetHighlights()
@@ -258,59 +340,100 @@ func handleMessageCommand(command string) func(ev *tcell.EventKey) *tcell.EventK
 		return nil
 	}
 }
-
 func handleMessagesMove(amount int) func(ev *tcell.EventKey) *tcell.EventKey {
 	return func(ev *tcell.EventKey) *tcell.EventKey {
-		if curRegions == nil || len(curRegions) == 0 {
+		if len(curRegions) == 0 {
 			return nil
 		}
 		hls := textView.GetHighlights()
 		if len(hls) > 0 {
-			newId := GetOffsetMsgId(hls[0], amount)
-			if newId != "" {
+			if newId := GetOffsetMsgId(hls[0], amount); newId != "" {
 				textView.Highlight(newId)
 			}
+		} else if amount < 0 {
+			textView.Highlight(curRegions[0].Id)
 		} else {
-			if amount < 0 {
-				textView.Highlight(curRegions[0].Id)
-			} else {
-				textView.Highlight(curRegions[len(curRegions)-1].Id)
-			}
+			textView.Highlight(curRegions[len(curRegions)-1].Id)
 		}
 		textView.ScrollToHighlight()
 		return nil
 	}
 }
-
 func handleChatPanelUp(ev *tcell.EventKey) *tcell.EventKey {
-	//TODO: scroll selection in treeView? or chatRoot? How?
-	return ev
+	children := chatRoot.GetChildren()
+	if len(children) == 0 {
+		return nil
+	}
+	current := treeView.GetCurrentNode()
+	idx := 0
+	for i, n := range children {
+		if n == current {
+			idx = i
+			break
+		}
+	}
+	if idx > 0 {
+		treeView.SetCurrentNode(children[idx-1])
+	} else {
+		treeView.SetCurrentNode(children[len(children)-1])
+	}
+	return nil
 }
-
 func handleChatPanelDown(ev *tcell.EventKey) *tcell.EventKey {
-	return ev
+	children := chatRoot.GetChildren()
+	if len(children) == 0 {
+		return nil
+	}
+	current := treeView.GetCurrentNode()
+	idx := -1
+	for i, n := range children {
+		if n == current {
+			idx = i
+			break
+		}
+	}
+	if idx >= 0 && idx < len(children)-1 {
+		treeView.SetCurrentNode(children[idx+1])
+	} else {
+		treeView.SetCurrentNode(children[0])
+	}
+	return nil
 }
-
+func handleOpenChat(ev *tcell.EventKey) *tcell.EventKey {
+	if treeView == nil {
+		return nil
+	}
+	node := treeView.GetCurrentNode()
+	if node == nil || node.GetReference() == nil {
+		return nil
+	}
+	recv, ok := node.GetReference().(messages.Chat)
+	if !ok {
+		return nil
+	}
+	SetDisplayedChat(recv)
+	sessionManager.PinChat(recv)
+	app.SetFocus(textInput)
+	return nil
+}
 func handleMessagesLast(ev *tcell.EventKey) *tcell.EventKey {
-	if curRegions == nil || len(curRegions) == 0 {
+	if len(curRegions) == 0 {
 		return nil
 	}
 	textView.Highlight(curRegions[len(curRegions)-1].Id)
 	textView.ScrollToHighlight()
 	return nil
 }
-
 func handleMessagesFirst(ev *tcell.EventKey) *tcell.EventKey {
-	if curRegions == nil || len(curRegions) == 0 {
+	if len(curRegions) == 0 {
 		return nil
 	}
 	textView.Highlight(curRegions[0].Id)
 	textView.ScrollToHighlight()
 	return nil
 }
-
 func handleExitMessages(ev *tcell.EventKey) *tcell.EventKey {
-	if curRegions == nil || len(curRegions) == 0 {
+	if len(curRegions) == 0 {
 		return nil
 	}
 	ResetMsgSelection()
@@ -318,70 +441,89 @@ func handleExitMessages(ev *tcell.EventKey) *tcell.EventKey {
 	return nil
 }
 
-// load the key map
+func applyChatSearch(query string) {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		clearChatSearch()
+		return
+	}
+	searchMode = true
+	searchResults = sessionManager.ResolveSearchChats(trimmed)
+	renderChatNodes(searchResults, "Contacts")
+	if len(searchResults) > 0 {
+		treeView.SetCurrentNode(chatRoot.GetChildren()[0])
+	}
+}
+func clearChatSearch() {
+	searchMode = false
+	searchResults = nil
+	renderChatNodes(sessionManager.GetKnownChats(), "Contacts")
+}
+func renderChatNodes(ids []messages.Chat, title string) {
+	sidebarTitle = title
+	chatRoot.SetText(title)
+	chatRoot.ClearChildren()
+	oldId := currentReceiver.Id
+	for _, element := range ids {
+		if element.Id == messages.STATUSSUFFIX {
+			continue
+		}
+		name := element.Name
+		if name == "" {
+			name = strings.TrimSuffix(strings.TrimSuffix(element.Id, messages.GROUPSUFFIX), messages.CONTACTSUFFIX)
+		}
+		if element.Unread > 0 {
+			name += " ([" + config.Config.Colors.UnreadCount + "]" + fmt.Sprint(element.Unread) + "[-])"
+		}
+		node := tview.NewTreeNode(name).SetReference(element).SetSelectable(true)
+		node.SetColor(uiColor(config.Config.Colors.ListContact))
+		if element.IsGroup {
+			node.SetColor(uiColor(config.Config.Colors.ListGroup))
+		}
+		if element.Id == currentReceiver.Id {
+			node.SetColor(uiColor(config.Config.Colors.InputText))
+			node.SetText("[" + config.Config.Colors.InputText + ":" + config.Config.Colors.ListSelected + "] " + name + " [-:-:-]")
+		}
+		if element.Id == oldId {
+			currentReceiver = element
+		}
+		chatRoot.AddChild(node)
+		if element.Id == currentReceiver.Id {
+			treeView.SetCurrentNode(node)
+		}
+	}
+}
+
 func LoadShortcuts() {
-	// global bindings for app
 	keyBindings = cbind.NewConfiguration()
-	if err := keyBindings.Set(config.Config.Keymap.FocusMessages, handleFocusMessage); err != nil {
-		PrintErrorMsg("focus_messages:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.FocusInput, handleFocusInput); err != nil {
-		PrintErrorMsg("focus_input:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.FocusChats, handleFocusContacts); err != nil {
-		PrintErrorMsg("focus_contacts:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.SwitchPanels, handleSwitchPanels); err != nil {
-		PrintErrorMsg("switch_panels:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.CommandRead, handleCommand("read")); err != nil {
-		PrintErrorMsg("command_read:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.Copyuser, handleCopyUser); err != nil {
-		PrintErrorMsg("copyuser:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.Pasteuser, handlePasteUser); err != nil {
-		PrintErrorMsg("pasteuser:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.CommandBacklog, handleCommand("backlog")); err != nil {
-		PrintErrorMsg("command_backlog:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.CommandConnect, handleCommand("login")); err != nil {
-		PrintErrorMsg("command_connect:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.CommandQuit, handleQuit); err != nil {
-		PrintErrorMsg("command_quit:", err)
-	}
-	if err := keyBindings.Set(config.Config.Keymap.CommandHelp, handleHelp); err != nil {
-		PrintErrorMsg("command_help:", err)
-	}
+	_ = keyBindings.Set(config.Config.Keymap.FocusMessages, handleFocusMessage)
+	_ = keyBindings.Set(config.Config.Keymap.FocusInput, handleFocusInput)
+	_ = keyBindings.Set(config.Config.Keymap.FocusChats, handleFocusContacts)
+	_ = keyBindings.Set("Ctrl+f", func(ev *tcell.EventKey) *tcell.EventKey {
+		app.SetFocus(chatSearchInput)
+		UpdateStatusBar(messages.SessionStatus{})
+		return nil
+	})
+	_ = keyBindings.Set(config.Config.Keymap.SwitchPanels, handleSwitchPanels)
+	_ = keyBindings.Set(config.Config.Keymap.CommandRead, handleCommand("read"))
+	_ = keyBindings.Set(config.Config.Keymap.Copyuser, handleCopyUser)
+	_ = keyBindings.Set(config.Config.Keymap.Pasteuser, handlePasteUser)
+	_ = keyBindings.Set(config.Config.Keymap.CommandBacklog, handleCommand("backlog"))
+	_ = keyBindings.Set(config.Config.Keymap.CommandConnect, handleCommand("login"))
+	_ = keyBindings.Set(config.Config.Keymap.CommandQuit, handleQuit)
+	_ = keyBindings.Set(config.Config.Keymap.CommandHelp, handleHelp)
+	keyBindings.SetKey(tcell.ModNone, tcell.KeyF1, handleHelp)
 	app.SetInputCapture(keyBindings.Capture)
-	// bindings for chat message text view
+
 	keysMessages := cbind.NewConfiguration()
-	if err := keysMessages.Set(config.Config.Keymap.MessageDownload, handleMessageCommand("download")); err != nil {
-		PrintErrorMsg("message_download:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.MessageOpen, handleMessageCommand("open")); err != nil {
-		PrintErrorMsg("message_open:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.Copyuser, handleCopyUser); err != nil {
-		PrintErrorMsg("copyuser:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.Pasteuser, handlePasteUser); err != nil {
-		PrintErrorMsg("pasteuser:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.MessageShow, handleMessageCommand("show")); err != nil {
-		PrintErrorMsg("message_show:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.MessageUrl, handleMessageCommand("url")); err != nil {
-		PrintErrorMsg("message_url:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.MessageInfo, handleMessageCommand("info")); err != nil {
-		PrintErrorMsg("message_info:", err)
-	}
-	if err := keysMessages.Set(config.Config.Keymap.MessageRevoke, handleMessageCommand("revoke")); err != nil {
-		PrintErrorMsg("message_revoke:", err)
-	}
+	_ = keysMessages.Set(config.Config.Keymap.MessageDownload, handleMessageCommand("download"))
+	_ = keysMessages.Set(config.Config.Keymap.MessageOpen, handleMessageCommand("open"))
+	_ = keysMessages.Set(config.Config.Keymap.Copyuser, handleCopyUser)
+	_ = keysMessages.Set(config.Config.Keymap.Pasteuser, handlePasteUser)
+	_ = keysMessages.Set(config.Config.Keymap.MessageShow, handleMessageCommand("show"))
+	_ = keysMessages.Set(config.Config.Keymap.MessageUrl, handleMessageCommand("url"))
+	_ = keysMessages.Set(config.Config.Keymap.MessageInfo, handleMessageCommand("info"))
+	_ = keysMessages.Set(config.Config.Keymap.MessageRevoke, handleMessageCommand("revoke"))
 	keysMessages.SetKey(tcell.ModNone, tcell.KeyEscape, handleExitMessages)
 	keysMessages.SetKey(tcell.ModNone, tcell.KeyUp, handleMessagesMove(-1))
 	keysMessages.SetKey(tcell.ModNone, tcell.KeyDown, handleMessagesMove(1))
@@ -394,73 +536,89 @@ func LoadShortcuts() {
 	keysMessages.SetRune(tcell.ModCtrl, 'u', handleMessagesMove(-10))
 	keysMessages.SetRune(tcell.ModCtrl, 'd', handleMessagesMove(10))
 	textView.SetInputCapture(keysMessages.Capture)
+
 	keysChatPanel := cbind.NewConfiguration()
+	keysChatPanel.SetKey(tcell.ModNone, tcell.KeyUp, handleChatPanelUp)
+	keysChatPanel.SetKey(tcell.ModNone, tcell.KeyDown, handleChatPanelDown)
+	_ = keysChatPanel.Set(config.Config.Keymap.OpenChat, handleOpenChat)
 	keysChatPanel.SetRune(tcell.ModCtrl, 'u', handleChatPanelUp)
 	keysChatPanel.SetRune(tcell.ModCtrl, 'd', handleChatPanelDown)
 	treeView.SetInputCapture(keysChatPanel.Capture)
 }
 
-// prints help to chat view
 func PrintHelp() {
 	cmdPrefix := config.Config.General.CmdPrefix
+	textView.Clear()
 	fmt.Fprintln(textView, "[-::u]Keys:[-::-]")
-	fmt.Fprintln(textView, "")
 	fmt.Fprintln(textView, "Global")
-	fmt.Fprintln(textView, "[::b] Up/Down[::-] = Scroll history/chats")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.SwitchPanels, "[::-] = Switch input/chats")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.FocusMessages, "[::-] = Focus message panel")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.CommandQuit, "[::-] = Exit app")
-	fmt.Fprintln(textView, "")
-	fmt.Fprintln(textView, "[-::-]Message panel[-::-]")
-	fmt.Fprintln(textView, "[::b] Up/Down[::-] = select message")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.MessageDownload, "[::-] = Download attachment")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.MessageOpen, "[::-] = Download & open attachment")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.MessageShow, "[::-] = Download & show image using", config.Config.General.ShowCommand)
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.MessageUrl, "[::-] = Find URL in message and open it")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.MessageRevoke, "[::-] = Revoke message")
-	fmt.Fprintln(textView, "[::b]", config.Config.Keymap.MessageInfo, "[::-] = Info about message")
-	fmt.Fprintln(textView, "")
+	fmt.Fprintln(textView, "[::b]Up/Down[::-] = Move in active list")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.SwitchPanels+"[::-] = Switch focus")
+	fmt.Fprintln(textView, "[::b]Ctrl+f[::-] = Focus contact search")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.OpenChat+"[::-] = Open selected chat")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.FocusMessages+"[::-] = Focus message actions")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.FocusChats+"[::-] = Focus contacts list")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.FocusInput+"[::-] = Focus reply box")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.CommandQuit+"[::-] = Exit app")
+	fmt.Fprintln(textView, "Message panel")
+	fmt.Fprintln(textView, "[::b]Up/Down[::-] = Select message")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.MessageDownload+"[::-] = Download attachment")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.MessageOpen+"[::-] = Download & open attachment")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.MessageShow+"[::-] = Show image using "+config.Config.General.ShowCommand)
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.MessageUrl+"[::-] = Open URL from selected message")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.MessageRevoke+"[::-] = Revoke selected message")
+	fmt.Fprintln(textView, "[::b]"+config.Config.Keymap.MessageInfo+"[::-] = Show selected message info\n")
 	fmt.Fprintln(textView, "Config file in ->", config.GetConfigFilePath())
-	fmt.Fprintln(textView, "")
 	fmt.Fprintln(textView, "Type [::b]"+cmdPrefix+"commands[::-] to see all commands")
-	fmt.Fprintln(textView, "")
+	fmt.Fprintln(textView, "Pick a contact on the left, then type in the reply box at the bottom.")
+	helpVisible = true
+}
+
+// ToggleHelp switches between the help screen and the current chat, so the
+// chat no longer gets wiped when help is opened.
+func ToggleHelp() {
+	if helpVisible {
+		restoreChatScreen()
+	} else {
+		PrintHelp()
+	}
+}
+
+func restoreChatScreen() {
+	helpVisible = false
+	textView.Clear()
+	if len(curRegions) > 0 {
+		textView.SetText(getMessagesString(curRegions))
+		textView.ScrollToEnd()
+		return
+	}
+	if currentReceiver.Id != "" {
+		PrintText("[::d]~~~ no messages, press " + config.Config.Keymap.CommandBacklog + " to load backlog if available ~~~[::-]")
+		return
+	}
+	PrintHelp()
 }
 
 func PrintCommands() {
 	cmdPrefix := config.Config.General.CmdPrefix
+	textView.Clear()
 	fmt.Fprintln(textView, "")
 	fmt.Fprintln(textView, "[-::u]Commands:[-::-]")
 	fmt.Fprintln(textView, "")
-	fmt.Fprintln(textView, "[-::-]Global[-::-]")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"connect [::-]or[::b]", config.Config.Keymap.CommandConnect, "[::-] = (Re)Connect to server")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"disconnect[::-]  = Close the connection")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"logout[::-]  = Remove login data from computer")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"reset[::-]  = Remove stored session and reconnect cleanly")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"quit [::-]or[::b]", config.Config.Keymap.CommandQuit, "[::-] = Exit app")
-	fmt.Fprintln(textView, "")
-	fmt.Fprintln(textView, "[-::-]Chat[-::-]")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"backlog [::-]or[::b]", config.Config.Keymap.CommandBacklog, "[::-] = load next", config.Config.General.BacklogMsgQuantity, "previous messages")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"read [::-]or[::b]", config.Config.Keymap.CommandRead, "[::-] = mark new messages in chat as read")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"upload[::-] /path/to/file  = Upload any file as document")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendimage[::-] /path/to/file  = Send image message")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendvideo[::-] /path/to/file  = Send video message")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendaudio[::-] /path/to/file  = Send audio message")
-	fmt.Fprintln(textView, "")
-	fmt.Fprintln(textView, "[-::-]Groups[-::-]")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"leave[::-]  = Leave group")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"create[::-] [user-id[] [user-id[] Group Subject  = Create group with users")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"subject[::-] New Subject  = Change subject of group")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"add[::-] [user-id[]  = Add user to group")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"remove[::-] [user-id[]  = Remove user from group")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"admin[::-] [user-id[]  = Set admin role for user in group")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"removeadmin[::-] [user-id[]  = Remove admin role for user in group")
-	fmt.Fprintln(textView, "")
-	fmt.Fprintln(textView, "Use[::b]", config.Config.Keymap.Copyuser, "[::-]to copy a selected user id to clipboard")
-	fmt.Fprintln(textView, "Use[::b]", config.Config.Keymap.Pasteuser, "[::-]to paste clipboard to text input")
-	fmt.Fprintln(textView, "")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"disconnect[::-] = Close the connection")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"logout[::-] = Remove login data from computer")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"reset[::-] = Remove stored session and reconnect cleanly")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"quit [::-]or[::b] "+config.Config.Keymap.CommandQuit+"[::-] = Exit app")
+	fmt.Fprintln(textView, "Chat")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"backlog [::-]or[::b] "+config.Config.Keymap.CommandBacklog+"[::-] = load next "+fmt.Sprint(config.Config.General.BacklogMsgQuantity)+" previous messages")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"read [::-]or[::b] "+config.Config.Keymap.CommandRead+"[::-] = mark new messages in chat as read")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"upload[::-] /path/to/file = Upload any file as document")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendimage[::-] /path/to/file = Send image message")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendvideo[::-] /path/to/file = Send video message")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendaudio[::-] /path/to/file = Send audio message")
+	fmt.Fprintln(textView, "Use [::b]"+config.Config.Keymap.Copyuser+"[::-] to copy a selected user id to clipboard")
+	fmt.Fprintln(textView, "Use [::b]"+config.Config.Keymap.Pasteuser+"[::-] to paste clipboard to text input")
 }
 
-// called when text is entered by the user
 func EnterCommand(key tcell.Key) {
 	if sndTxt == "" {
 		return
@@ -471,7 +629,7 @@ func EnterCommand(key tcell.Key) {
 	}
 	cmdPrefix := config.Config.General.CmdPrefix
 	if sndTxt == cmdPrefix+"help" {
-		PrintHelp()
+		ToggleHelp()
 		textInput.SetText("")
 		return
 	}
@@ -498,22 +656,16 @@ func EnterCommand(key tcell.Key) {
 		return
 	}
 	if currentReceiver.Id == "" {
-		PrintText("no receiver")
+		PrintText("No active chat. Open one from Contacts first (Enter / Tab / Ctrl+e).")
 		textInput.SetText("")
 		return
 	}
-	// no command, send as message
-	msg := messages.Command{
-		Name:   "send",
-		Params: []string{currentReceiver.Id, sndTxt},
-	}
-	sessionManager.CommandChannel <- msg
+	sessionManager.CommandChannel <- messages.Command{Name: "send", Params: []string{currentReceiver.Id, sndTxt}}
 	textInput.SetText("")
 }
 
-// get the next message id to select (highlighted + offset)
 func GetOffsetMsgId(curId string, offset int) string {
-	if curRegions == nil || len(curRegions) == 0 {
+	if len(curRegions) == 0 {
 		return ""
 	}
 	for idx, val := range curRegions {
@@ -526,54 +678,37 @@ func GetOffsetMsgId(curId string, offset int) string {
 	}
 	if offset > 0 {
 		return curRegions[0].Id
-	} else {
-		return curRegions[len(curRegions)-1].Id
 	}
+	return curRegions[len(curRegions)-1].Id
 }
-
-// resets the selection in the textView and scrolls it down
 func ResetMsgSelection() {
 	if len(textView.GetHighlights()) > 0 {
 		textView.Highlight("")
 	}
 	textView.ScrollToEnd()
 }
-
-// prints text to the TextView
-func PrintText(txt string) {
-	fmt.Fprintln(textView, txt)
-}
-
-// prints an error to the TextView
+func PrintText(txt string) { fmt.Fprintln(textView, txt) }
 func PrintError(err error) {
-	if err == nil {
-		return
+	if err != nil {
+		fmt.Fprintln(textView, "["+config.Config.Colors.Negative+"]", err.Error(), "[-]")
 	}
-	fmt.Fprintln(textView, "["+config.Config.Colors.Negative+"]", err.Error(), "[-]")
 }
-
-// prints an error to the TextView
 func PrintErrorMsg(text string, err error) {
-	if err == nil {
-		return
+	if err != nil {
+		fmt.Fprintln(textView, "["+config.Config.Colors.Negative+"]", text, err.Error(), "[-]")
 	}
-	fmt.Fprintln(textView, "["+config.Config.Colors.Negative+"]", text, err.Error(), "[-]")
 }
 
-// prints an image attachment to the TextView (by message id)
 func PrintImage(path string) {
-	var err error
-	cmdParts := strings.Split(config.Config.General.ShowCommand, " ")
-	cmdParts = append(cmdParts, path)
+	cmdParts := append(strings.Split(config.Config.General.ShowCommand, " "), path)
 	var cmd *exec.Cmd
-	size := len(cmdParts)
-	if size > 1 {
+	if len(cmdParts) > 1 {
 		cmd = exec.Command(cmdParts[0], cmdParts[1:]...)
-	} else if size > 0 {
+	} else if len(cmdParts) > 0 {
 		cmd = exec.Command(cmdParts[0])
 	}
-	var stdout io.ReadCloser
-	if stdout, err = cmd.StdoutPipe(); err == nil {
+	stdout, err := cmd.StdoutPipe()
+	if err == nil {
 		if err = cmd.Start(); err == nil {
 			reader := bufio.NewReader(stdout)
 			io.Copy(tview.ANSIWriter(textView), reader)
@@ -583,7 +718,6 @@ func PrintImage(path string) {
 	PrintError(err)
 }
 
-// updates the status bar
 func UpdateStatusBar(statusInfo messages.SessionStatus) {
 	out := " "
 	if statusInfo.Connected {
@@ -591,10 +725,7 @@ func UpdateStatusBar(statusInfo messages.SessionStatus) {
 	} else {
 		out += "[" + config.Config.Colors.Negative + "]offline[-]"
 	}
-	out += " "
-	out += "[::d] ("
-	out += fmt.Sprint(statusInfo.BatteryCharge)
-	out += "%"
+	out += " [::d](" + fmt.Sprint(statusInfo.BatteryCharge) + "%"
 	if statusInfo.BatteryLoading {
 		out += " [" + config.Config.Colors.Positive + "]L[-]"
 	} else {
@@ -605,68 +736,101 @@ func UpdateStatusBar(statusInfo messages.SessionStatus) {
 	} else {
 		out += " [" + config.Config.Colors.Positive + "]s[-]"
 	}
-	out += ")[::-] "
-	out += statusInfo.LastSeen
-	infoBar.SetText(out)
-	//infoBar.SetText("🔋: ??%")
+	out += ")[::-] " + statusInfo.LastSeen
+	if currentReceiver.Name != "" {
+		out += " [::d]chat:[::-] " + currentReceiver.Name
+	}
+	focusLabel := ""
+	if chatSearchInput != nil && chatSearchInput.HasFocus() {
+		focusLabel = "search"
+	} else if treeView != nil && treeView.HasFocus() {
+		focusLabel = "chats"
+	} else if textView != nil && textView.HasFocus() {
+		focusLabel = "messages"
+	} else if textInput != nil && textInput.HasFocus() {
+		focusLabel = "input"
+	}
+	if focusLabel != "" {
+		out += " [::d]focus:[::-] [" + config.Config.Colors.InputBackground + "::b]" + focusLabel + "[-::-]"
+	}
+	if infoBar != nil {
+		infoBar.SetText(out)
+	}
+	applyFocusVisuals()
 }
 
-// sets the current chat, loads text from storage to TextView
+func applyFocusVisuals() {
+	if textInput != nil {
+		textInput.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
+		textInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.Background))
+		textInput.SetFieldTextColor(uiColor(config.Config.Colors.Text))
+	}
+	if chatSearchInput != nil {
+		chatSearchInput.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
+		chatSearchInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.SearchBackground))
+		chatSearchInput.SetFieldTextColor(uiColor(config.Config.Colors.Text))
+	}
+	if textInput != nil && textInput.HasFocus() {
+		textInput.SetLabelColor(uiColor(config.Config.Colors.InputBackground))
+		textInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.InputBackground))
+		textInput.SetFieldTextColor(uiColor(config.Config.Colors.InputText))
+	}
+	if chatSearchInput != nil && chatSearchInput.HasFocus() {
+		chatSearchInput.SetLabelColor(uiColor(config.Config.Colors.InputBackground))
+		chatSearchInput.SetFieldBackgroundColor(uiColor(config.Config.Colors.InputBackground))
+		chatSearchInput.SetFieldTextColor(uiColor(config.Config.Colors.InputText))
+	}
+	if chatRoot != nil {
+		if treeView != nil && treeView.HasFocus() {
+			chatRoot.SetText("[" + config.Config.Colors.InputBackground + "::b]" + sidebarTitle + "[-::-]")
+		} else {
+			chatRoot.SetText(sidebarTitle)
+		}
+	}
+}
+
 func SetDisplayedChat(wid messages.Chat) {
-	//TODO: how to get chat to set
 	currentReceiver = wid
+	helpVisible = false
 	textView.Clear()
 	textView.SetTitle(wid.Name)
 	sessionManager.CommandChannel <- messages.Command{"select", []string{currentReceiver.Id}}
+	app.SetFocus(textInput)
+	UpdateStatusBar(messages.SessionStatus{})
 }
-
-// get a string representation of all messages for chat
 func getMessagesString(msgs []messages.Message) string {
 	out := ""
 	for _, msg := range msgs {
-		out += getTextMessageString(&msg)
-		out += "\n"
+		out += getTextMessageString(&msg) + "\n"
 	}
 	return out
 }
-
-// create a formatted string with regions based on message ID from a text message
-//TODO: optimize, use Sprintf etc
 func getTextMessageString(msg *messages.Message) string {
-	colorMe := config.Config.Colors.ChatMe
-	colorContact := config.Config.Colors.ChatContact
-	out := ""
 	text := tview.Escape(msg.Text)
 	if msg.Forwarded {
 		text = "[" + config.Config.Colors.ForwardedText + "]" + text + "[-]"
 	}
-	tim := time.Unix(int64(msg.Timestamp), 0)
-	time := tim.Format("02-01-06 15:04:05")
-	out += "[\""
-	out += msg.Id
-	out += "\"]"
-	if msg.FromMe { //msg from me
-		out += "[-::d](" + time + ") [" + colorMe + "::b]Me: [-::-]" + text
-	} else { // message from others
-		out += "[-::d](" + time + ") [" + colorContact + "::b]" + msg.ContactShort + ": [-::-]" + text
+	tim := time.Unix(int64(msg.Timestamp), 0).Format("02-01-06 15:04:05")
+	if msg.FromMe {
+		return "[\"" + msg.Id + "\"][" + config.Config.Colors.Timestamp + "](" + tim + ") [" + config.Config.Colors.ChatMe + "::b]Me: [-::-]" + text + "[\"\"]"
 	}
-	out += "[\"\"]"
-	return out
+	return "[\"" + msg.Id + "\"][" + config.Config.Colors.Timestamp + "](" + tim + ") [" + config.Config.Colors.ChatContact + "::b]" + msg.ContactShort + ": [-::-]" + text + "[\"\"]"
 }
 
 type UiHandler struct{}
 
 func (u UiHandler) NewMessage(msg messages.Message) {
-	//TODO: its stupid to "go" this as its supposed to run
-	//on the ui thread anyway. But QueueUpdate blocks...?
 	go app.QueueUpdateDraw(func() {
+		if helpVisible {
+			restoreChatScreen()
+		}
 		curRegions = append(curRegions, msg)
 		PrintText(getTextMessageString(&msg))
 	})
 }
-
 func (u UiHandler) NewScreen(msgs []messages.Message) {
 	go app.QueueUpdateDraw(func() {
+		helpVisible = false
 		textView.Clear()
 		screen := getMessagesString(msgs)
 		textView.SetText(screen)
@@ -675,74 +839,25 @@ func (u UiHandler) NewScreen(msgs []messages.Message) {
 			if currentReceiver.Id == "" {
 				PrintHelp()
 			} else {
-				PrintText("[::d] ~~~ no messages, press " + config.Config.Keymap.CommandBacklog + " to load backlog if available ~~~[::-]")
+				PrintText("[::d]~~~ no messages, press " + config.Config.Keymap.CommandBacklog + " to load backlog if available ~~~[::-]")
 			}
 		}
 	})
 }
-
-// loads the chat data from storage to the TreeView
 func (u UiHandler) SetChats(ids []messages.Chat) {
 	go app.QueueUpdateDraw(func() {
-		chatRoot.ClearChildren()
-		oldId := currentReceiver.Id
-		for _, element := range ids {
-			name := element.Name
-			if name == "" {
-				name = strings.TrimSuffix(strings.TrimSuffix(element.Id, messages.GROUPSUFFIX), messages.CONTACTSUFFIX)
-			}
-			if element.Unread > 0 {
-				name += " ([" + config.Config.Colors.UnreadCount + "]" + fmt.Sprint(element.Unread) + "[-])"
-				//tim := time.Unix(element.LastMessage, 0)
-				//sin := time.Since(tim)
-				//since := fmt.Sprintf("%s", sin)
-				//time := tim.Format("02-01-06 15:04:05")
-				//name += since
-			}
-			node := tview.NewTreeNode(name).
-				SetReference(element).
-				SetSelectable(true)
-			if element.IsGroup {
-				node.SetColor(tcell.ColorNames[config.Config.Colors.ListGroup])
-			} else {
-				node.SetColor(tcell.ColorNames[config.Config.Colors.ListContact])
-			}
-			// store new currentReceiver, else the selection on the left goes off
-			if element.Id == oldId {
-				currentReceiver = element
-			}
-			chatRoot.AddChild(node)
-			if element.Id == currentReceiver.Id {
-				treeView.SetCurrentNode(node)
-			}
+		if searchMode {
+			renderChatNodes(searchResults, "Contacts")
+		} else {
+			renderChatNodes(ids, "Contacts")
 		}
 	})
 }
-
-func (u UiHandler) PrintError(err error) {
-	PrintError(err)
-}
-
-func (u UiHandler) PrintText(msg string) {
-	PrintText(msg)
-}
-
-func (u UiHandler) PrintFile(path string) {
-	go app.QueueUpdateDraw(func() {
-		PrintImage(path)
-	})
-}
-
-func (u UiHandler) OpenFile(path string) {
-	open.Run(path)
-}
-
+func (u UiHandler) PrintError(err error)  { PrintError(err) }
+func (u UiHandler) PrintText(msg string)  { PrintText(msg) }
+func (u UiHandler) PrintFile(path string) { go app.QueueUpdateDraw(func() { PrintImage(path) }) }
+func (u UiHandler) OpenFile(path string)  { open.Run(path) }
 func (u UiHandler) SetStatus(status messages.SessionStatus) {
-	go app.QueueUpdateDraw(func() {
-		UpdateStatusBar(status)
-	})
+	go app.QueueUpdateDraw(func() { UpdateStatusBar(status) })
 }
-
-func (u UiHandler) GetWriter() io.Writer {
-	return textView
-}
+func (u UiHandler) GetWriter() io.Writer { return textView }
