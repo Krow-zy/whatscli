@@ -20,6 +20,7 @@ type IniFile struct {
 }
 
 type General struct {
+	Theme               string
 	DownloadPath        string
 	PreviewPath         string
 	CmdPrefix           string
@@ -28,6 +29,12 @@ type General struct {
 	UseTerminalBell     bool
 	NotificationTimeout int64
 	BacklogMsgQuantity  int
+	ChatListMode        string
+	EnableDiagnostics   bool
+	DebugInputEvents    bool
+	DebugEventFlow      bool
+	DebugUiUpdates      bool
+	DiagnosticsLogPath  string
 }
 
 type Keymap struct {
@@ -35,6 +42,7 @@ type Keymap struct {
 	FocusMessages   string
 	FocusInput      string
 	FocusChats      string
+	OpenChat        string
 	Copyuser        string
 	Pasteuser       string
 	CommandBacklog  string
@@ -50,29 +58,31 @@ type Keymap struct {
 	MessageRevoke   string
 }
 
-type Ui struct {
-	ChatSidebarWidth int
-}
+type Ui struct{ ChatSidebarWidth int }
 
 type Colors struct {
-	Background      string
-	Text            string
-	ForwardedText   string
-	ListHeader      string
-	ListContact     string
-	ListGroup       string
-	ChatContact     string
-	ChatMe          string
-	Borders         string
-	InputBackground string
-	InputText       string
-	UnreadCount     string
-	Positive        string
-	Negative        string
+	Background       string
+	Text             string
+	ForwardedText    string
+	ListHeader       string
+	ListContact      string
+	ListGroup        string
+	ListSelected     string
+	ChatContact      string
+	ChatMe           string
+	Borders          string
+	InputBackground  string
+	InputText        string
+	UnreadCount      string
+	Positive         string
+	Negative         string
+	Timestamp        string
+	SearchBackground string
 }
 
 var Config = IniFile{
 	&General{
+		Theme:               "warm",
 		DownloadPath:        GetHomeDir() + "Downloads",
 		PreviewPath:         GetHomeDir() + "Downloads",
 		CmdPrefix:           "/",
@@ -81,19 +91,26 @@ var Config = IniFile{
 		UseTerminalBell:     false,
 		NotificationTimeout: 60,
 		BacklogMsgQuantity:  10,
+		ChatListMode:        "recency_only",
+		EnableDiagnostics:   false,
+		DebugInputEvents:    false,
+		DebugEventFlow:      false,
+		DebugUiUpdates:      false,
+		DiagnosticsLogPath:  "",
 	},
 	&Keymap{
 		SwitchPanels:    "Tab",
 		FocusMessages:   "Ctrl+w",
 		FocusInput:      "Ctrl+Space",
 		FocusChats:      "Ctrl+e",
+		OpenChat:        "Enter",
 		CommandBacklog:  "Ctrl+b",
 		CommandRead:     "Ctrl+n",
 		Copyuser:        "Ctrl+c",
 		Pasteuser:       "Ctrl+v",
 		CommandConnect:  "Ctrl+r",
 		CommandQuit:     "Ctrl+q",
-		CommandHelp:     "Ctrl+?",
+		CommandHelp:     "F1",
 		MessageDownload: "d",
 		MessageInfo:     "i",
 		MessageOpen:     "o",
@@ -101,33 +118,17 @@ var Config = IniFile{
 		MessageRevoke:   "r",
 		MessageShow:     "s",
 	},
-	&Ui{
-		ChatSidebarWidth: 30,
-	},
-	&Colors{
-		Background:      "black",
-		Text:            "white",
-		ForwardedText:   "purple",
-		ListHeader:      "yellow",
-		ListContact:     "green",
-		ListGroup:       "blue",
-		ChatContact:     "green",
-		ChatMe:          "blue",
-		Borders:         "white",
-		InputBackground: "blue",
-		InputText:       "white",
-		UnreadCount:     "yellow",
-		Positive:        "green",
-		Negative:        "red",
-	},
+	&Ui{ChatSidebarWidth: 30},
+	&Colors{},
 }
 
 func InitConfig() {
 	var err error
+	ApplyTheme(RetroTheme())
 	if configFilePath, err = xdg.ConfigFile("whatscli/whatscli.config"); err == nil {
-		// add any new values
 		var cfg *ini.File
 		if cfg, err = ini.Load(configFilePath); err == nil {
+			fmt.Println("Loaded config:", configFilePath)
 			cfg.NameMapper = ini.TitleUnderscore
 			cfg.ValueMapper = os.ExpandEnv
 			if section, err := cfg.GetSection("general"); err == nil {
@@ -139,14 +140,13 @@ func InitConfig() {
 			if section, err := cfg.GetSection("ui"); err == nil {
 				section.MapTo(&Config.Ui)
 			}
+			// ponytail: single theme for now; add a registry when a second theme lands
+			if Config.General.Theme == "warm" {
+				ApplyTheme(RetroTheme())
+			}
 			if section, err := cfg.GetSection("colors"); err == nil {
 				section.MapTo(&Config.Colors)
 			}
-			//TODO: only save if changes
-			//newCfg := ini.Empty()
-			//if err = ini.ReflectFromWithMapper(newCfg, &Config, ini.TitleUnderscore); err == nil {
-			//err = newCfg.SaveTo(configFilePath)
-			//}
 		} else {
 			cfg = ini.Empty()
 			cfg.NameMapper = ini.TitleUnderscore
@@ -161,9 +161,7 @@ func InitConfig() {
 	}
 }
 
-func GetConfigFilePath() string {
-	return configFilePath
-}
+func GetConfigFilePath() string { return configFilePath }
 
 func GetSessionFilePath() string {
 	if sessionFilePath, err := xdg.ConfigFile("whatscli/session"); err == nil {
@@ -172,10 +170,7 @@ func GetSessionFilePath() string {
 	return GetHomeDir() + ".whatscli.session"
 }
 
-// gets the OS home dir with a path separator at the end
 func GetHomeDir() string {
-	usr, err := user.Current()
-	if err != nil {
-	}
+	usr, _ := user.Current()
 	return usr.HomeDir + string(os.PathSeparator)
 }
