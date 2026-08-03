@@ -15,7 +15,6 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/gen2brain/beeep"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
 	"github.com/normen/whatscli/config"
 	"github.com/normen/whatscli/qrcode"
 	"github.com/rivo/tview"
@@ -26,6 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	_ "modernc.org/sqlite" // SQLite driver (pure Go)
 )
 
 var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
@@ -132,7 +132,7 @@ func (sm *SessionManager) setCurrentReceiver(id string) {
 func (sm *SessionManager) getConnection() (*whatsmeow.Client, error) {
 	if sm.client == nil {
 		dbPath := config.GetSessionFilePath() + ".db"
-		container, err := sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Noop)
+		container, err := sqlstore.New(context.Background(), "sqlite", "file:"+dbPath+"?_pragma=foreign_keys(1)", waLog.Noop)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to database: %v", err)
 		}
@@ -264,7 +264,7 @@ func (sm *SessionManager) loadRecentChats() {
 		}
 	}
 
-	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.uiHandler.SetChats(sm.GetKnownChats())
 	if addedChats > 0 {
 		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d chats", addedChats))
 	}
@@ -539,7 +539,7 @@ func (sm *SessionManager) markCurrentChatRead() {
 
 	unreadMessages := sm.db.MarkChatRead(sm.currentReceiver)
 	if len(unreadMessages) == 0 {
-		sm.uiHandler.SetChats(sm.db.GetChatIds())
+		sm.uiHandler.SetChats(sm.GetKnownChats())
 		sm.uiHandler.PrintText("No unread messages in current chat")
 		return
 	}
@@ -578,7 +578,7 @@ func (sm *SessionManager) markCurrentChatRead() {
 		}
 	}
 
-	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.uiHandler.SetChats(sm.GetKnownChats())
 }
 
 func (sm *SessionManager) downloadCommand(params []string, preview, show bool) {
@@ -734,7 +734,7 @@ func (sm *SessionManager) createGroup(params []string) {
 		Name:        groupInfo.Name,
 		LastMessage: time.Now().Unix(),
 	})
-	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.uiHandler.SetChats(sm.GetKnownChats())
 	sm.uiHandler.PrintText("created new group " + groupInfo.JID.String())
 }
 
@@ -788,7 +788,7 @@ func (sm *SessionManager) updateCurrentGroupSubject(params []string) {
 		IsGroup: true,
 		Name:    name,
 	})
-	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.uiHandler.SetChats(sm.GetKnownChats())
 	sm.uiHandler.PrintText("updated subject for " + groupJID.String())
 }
 
@@ -836,7 +836,7 @@ func (sm *SessionManager) sendText(wid, text string) {
 	if sm.currentReceiver == wid {
 		sm.uiHandler.NewMessage(newMsg)
 	}
-	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.uiHandler.SetChats(sm.GetKnownChats())
 }
 
 func (sm *SessionManager) sendMedia(chatID, path string, kind MessageKind) error {
@@ -921,7 +921,7 @@ func (sm *SessionManager) sendMedia(chatID, path string, kind MessageKind) error
 	if sm.currentReceiver == chatID {
 		sm.uiHandler.NewMessage(newMsg)
 	}
-	sm.uiHandler.SetChats(sm.db.GetChatIds())
+	sm.uiHandler.SetChats(sm.GetKnownChats())
 	return nil
 }
 
@@ -994,7 +994,7 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 		if eh.sm.db.MarkMessageRevoked(msg.Id) && eh.sm.currentReceiver == msg.ChatId {
 			eh.sm.uiHandler.NewScreen(eh.sm.getMessages(msg.ChatId))
 		}
-		eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
+		eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 		return
 	case "ignore":
 		return
@@ -1013,7 +1013,7 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 			eh.sm.uiHandler.PrintError(err)
 		}
 	}
-	eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
+	eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 }
 
 func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
@@ -1073,7 +1073,7 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))
 	}
 
-	eh.sm.uiHandler.SetChats(eh.sm.db.GetChatIds())
+	eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 	if eh.sm.currentReceiver != "" {
 		eh.sm.uiHandler.NewScreen(eh.sm.getMessages(eh.sm.currentReceiver))
 	}
@@ -1084,7 +1084,12 @@ func (eh *eventHandler) normalizeEventMessage(evt *events.Message) (Message, str
 		return Message{}, "ignore", false
 	}
 
-	if protocol := evt.Message.GetProtocolMessage(); protocol != nil {
+	raw := unwrapMessage(evt.Message)
+	if raw == nil {
+		return Message{}, "ignore", false
+	}
+
+	if protocol := raw.GetProtocolMessage(); protocol != nil {
 		if protocol.GetType() == waProto.ProtocolMessage_REVOKE && protocol.GetKey() != nil {
 			return Message{
 				Id:     protocol.GetKey().GetID(),
@@ -1094,7 +1099,7 @@ func (eh *eventHandler) normalizeEventMessage(evt *events.Message) (Message, str
 		return Message{}, "ignore", false
 	}
 
-	msg, ok := eh.messageFromInfo(evt.Info, evt.Message)
+	msg, ok := eh.messageFromInfo(evt.Info, raw)
 	return msg, "", ok
 }
 
@@ -1360,4 +1365,104 @@ func mediaDisplayText(kind MessageKind, fileName, caption string) string {
 		parts = append(parts, caption)
 	}
 	return strings.Join(parts, " ")
+}
+
+// isSidebarChat reports whether a chat ID belongs in the sidebar: real 1:1
+// accounts and groups only — never status, broadcasts or newsletters.
+func isSidebarChat(id string) bool {
+	return id != "" &&
+		!strings.HasSuffix(id, "@broadcast") &&
+		!strings.HasSuffix(id, "@newsletter")
+}
+
+func (sm *SessionManager) GetKnownChats() []Chat {
+	chats := sm.db.GetChatIds()
+	filtered := make([]Chat, 0, len(chats))
+	for _, chat := range chats {
+		if !isSidebarChat(chat.Id) {
+			continue
+		}
+		if config.Config.General.ChatListMode == "recency_only" && chat.LastMessage == 0 {
+			continue
+		}
+		filtered = append(filtered, chat)
+	}
+	return filtered
+}
+
+func (sm *SessionManager) PinChat(chat Chat) {
+	if chat.Id == "" || chat.Id == STATUSSUFFIX {
+		return
+	}
+	if chat.Name == "" {
+		chat.Name = sm.db.GetIdName(chat.Id)
+	}
+	if chat.LastMessage == 0 {
+		chat.LastMessage = time.Now().Unix()
+	}
+	sm.db.AddChat(chat)
+	sm.uiHandler.SetChats(sm.GetKnownChats())
+}
+
+// ResolveSearchChats searches the in-memory chat and contact stores only —
+// no database or network I/O, so it stays instant on every keystroke.
+func (sm *SessionManager) ResolveSearchChats(keyword string) []Chat {
+	needle := strings.TrimSpace(strings.ToLower(keyword))
+	if needle == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]Chat, 0)
+	for _, chat := range sm.db.GetChatIds() {
+		if !isSidebarChat(chat.Id) {
+			continue
+		}
+		if chatMatches(chat, needle) {
+			seen[chat.Id] = struct{}{}
+			out = append(out, chat)
+		}
+	}
+	for _, contact := range sm.db.GetAllContacts() {
+		if !strings.HasSuffix(contact.Id, CONTACTSUFFIX) {
+			continue
+		}
+		if _, ok := seen[contact.Id]; ok {
+			continue
+		}
+		chat := Chat{Id: contact.Id, IsGroup: false, Name: contact.Name}
+		if !chatMatches(chat, needle) {
+			continue
+		}
+		seen[contact.Id] = struct{}{}
+		out = append(out, chat)
+	}
+	return out
+}
+
+func chatMatches(chat Chat, needle string) bool {
+	if strings.Contains(strings.ToLower(chat.Name), needle) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(chat.Id), needle)
+}
+
+
+func unwrapMessage(msg *waProto.Message) *waProto.Message {
+	for msg != nil {
+		switch {
+		case msg.GetEphemeralMessage() != nil:
+			msg = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage() != nil:
+			msg = msg.GetViewOnceMessage().GetMessage()
+		case msg.GetViewOnceMessageV2() != nil:
+			msg = msg.GetViewOnceMessageV2().GetMessage()
+		case msg.GetViewOnceMessageV2Extension() != nil:
+			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
+		case msg.GetDeviceSentMessage() != nil:
+			msg = msg.GetDeviceSentMessage().GetMessage()
+		default:
+			return msg
+		}
+	}
+	return nil
 }
