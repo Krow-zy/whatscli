@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"regexp"
 
 	"github.com/adrg/xdg"
 	"gopkg.in/ini.v1"
 )
+
+var profileNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 var configFilePath string
 var cfg *ini.File
@@ -35,6 +38,9 @@ type General struct {
 	DebugEventFlow      bool
 	DebugUiUpdates      bool
 	DiagnosticsLogPath  string
+	Profile             string
+	EnablePassphrase    bool
+	PassphraseHash      string
 }
 
 type Keymap struct {
@@ -177,10 +183,42 @@ func SaveNotifications(enabled bool) {
 }
 
 func GetSessionFilePath() string {
-	if sessionFilePath, err := xdg.ConfigFile("whatscli/session"); err == nil {
+	name := "session"
+	if Config.General.Profile != "" {
+		name = "session." + Config.General.Profile
+	}
+	if sessionFilePath, err := xdg.ConfigFile("whatscli/" + name); err == nil {
 		return sessionFilePath
 	}
-	return GetHomeDir() + ".whatscli.session"
+	return GetHomeDir() + "." + name
+}
+
+// ValidProfileName reports whether name is safe to embed in a session file path.
+func ValidProfileName(name string) bool {
+	return name != "" && profileNameRe.MatchString(name)
+}
+
+// SessionDbFileExists reports whether a stored session exists for the active profile.
+func SessionDbFileExists() bool {
+	_, err := os.Stat(GetSessionFilePath() + ".db")
+	return err == nil
+}
+
+// SaveGeneralKeys persists the given [general] section keys to the config file.
+func SaveGeneralKeys(keys map[string]string) {
+	if cfg == nil {
+		return
+	}
+	section, err := cfg.GetSection("general")
+	if err != nil {
+		return
+	}
+	for k, v := range keys {
+		section.Key(k).SetValue(v)
+	}
+	if err := cfg.SaveTo(configFilePath); err != nil {
+		fmt.Print(err.Error())
+	}
 }
 
 func GetHomeDir() string {

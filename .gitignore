@@ -3,3 +3,6 @@ whatscli
 whatscli.exe
 run.log
 graphify-out/
+payloads/
+mitm_mcp_traffic.db
+kimi-export-session_*.md

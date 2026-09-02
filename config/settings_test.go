@@ -28,4 +28,13 @@ func TestGeneralDefaults(t *testing.T) {
 	if Config.Colors.ListHeader != "#F1EBD9" {
 		t.Fatalf("expected retro list header #F1EBD9, got %q", Config.Colors.ListHeader)
 	}
+	if Config.General.Profile != "" {
+		t.Fatalf("expected empty default profile, got %q", Config.General.Profile)
+	}
+	if Config.General.EnablePassphrase {
+		t.Fatalf("passphrase lock must be off by default")
+	}
+	if Config.General.PassphraseHash != "" {
+		t.Fatalf("expected empty passphrase hash by default")
+	}
 }

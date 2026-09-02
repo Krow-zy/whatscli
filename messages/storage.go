@@ -28,6 +28,17 @@ func (md *MessageDatabase) Init() {
 	md.contacts = make(map[string]Contact)
 }
 
+// Reset reinitialises the message database, holding all synchronisation locks.
+func (md *MessageDatabase) Reset() {
+	md.messageLock.Lock()
+	defer md.messageLock.Unlock()
+	md.chatLock.Lock()
+	defer md.chatLock.Unlock()
+	md.contactLock.Lock()
+	defer md.contactLock.Unlock()
+	md.Init()
+}
+
 // AddMessage stores a message and updates related chat state.
 func (md *MessageDatabase) AddMessage(msg Message, markUnread bool) bool {
 	md.messageLock.Lock()

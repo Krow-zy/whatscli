@@ -12,6 +12,7 @@ import (
 type UiMessageHandler interface {
 	NewMessage(Message)
 	NewScreen([]Message)
+	ResetChat()
 	SetChats([]Chat)
 	PrintError(error)
 	PrintText(string)

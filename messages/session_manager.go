@@ -385,6 +385,8 @@ func (sm *SessionManager) execCommand(command Command) {
 		sm.uiHandler.PrintError(sm.disconnect())
 	case "logout":
 		sm.uiHandler.PrintError(sm.logout())
+	case "profile":
+		sm.profileCommand(command.Params)
 	case "send":
 		if checkParam(command.Params, 2) {
 			sm.sendText(command.Params[0], strings.Join(command.Params[1:], " "))
@@ -534,6 +536,71 @@ func (sm *SessionManager) resetSession() {
 	}
 	sm.StatusChannel <- StatusMsg{false, nil}
 	sm.uiHandler.PrintText("Session reset. Use /connect to reconnect with a new QR code.")
+}
+
+// profileCommand lists profiles or switches to another saved session profile.
+func (sm *SessionManager) profileCommand(params []string) {
+	if len(params) == 0 {
+		current := config.Config.General.Profile
+		if current == "" {
+			current = "default"
+		}
+		sm.uiHandler.PrintText("Active profile: " + current)
+		sm.uiHandler.PrintText("Available profiles:")
+		dir := filepath.Dir(config.GetSessionFilePath())
+		files, err := filepath.Glob(filepath.Join(dir, "session*.db"))
+		if err != nil || len(files) == 0 {
+			sm.uiHandler.PrintText("  (none)")
+			return
+		}
+		for _, f := range files {
+			name := strings.TrimSuffix(filepath.Base(f), ".db")
+			if name == "session" {
+				name = "default"
+			} else {
+				name = strings.TrimPrefix(name, "session.")
+			}
+			sm.uiHandler.PrintText("  - " + name)
+		}
+		return
+	}
+	name := params[0]
+	if !config.ValidProfileName(name) {
+		sm.uiHandler.PrintError(fmt.Errorf("invalid profile name %q (allowed: letters, digits, _ and -)", name))
+		return
+	}
+	sm.switchProfile(name)
+}
+
+// switchProfile tears down the current connection and switches to another profile.
+func (sm *SessionManager) switchProfile(name string) {
+	if sm.client != nil {
+		if sm.client.IsConnected() {
+			sm.client.Disconnect()
+		}
+		sm.client = nil
+	}
+	if sm.container != nil {
+		if err := sm.container.Close(); err != nil {
+			sm.uiHandler.PrintText("Warning: Couldn't close session store: " + err.Error())
+		}
+		sm.container = nil
+	}
+	sm.db.Reset()
+	sm.currentReceiver = ""
+	sm.statusInfo.ContactPresence = ""
+	sm.uiHandler.ResetChat()
+
+	config.Config.General.Profile = name
+	config.SaveGeneralKeys(map[string]string{"profile": name})
+
+	sm.uiHandler.PrintText(fmt.Sprintf("Switched to profile %q", name))
+	if err := sm.login(); err != nil {
+		sm.uiHandler.PrintError(fmt.Errorf("WhatsApp connection failed: %v", err))
+		sm.uiHandler.PrintText("Try using /reset to completely reset the connection")
+	} else {
+		sm.uiHandler.PrintText("Successfully connected to WhatsApp")
+	}
 }
 
 func (sm *SessionManager) markCurrentChatRead() {

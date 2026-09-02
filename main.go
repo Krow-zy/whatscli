@@ -34,6 +34,7 @@ var infoBar *tview.TextView
 
 var chatRoot *tview.TreeNode
 var app *tview.Application
+var gridLayout *tview.Grid
 var sidebarFlex *tview.Flex
 var sidebarTitle string = "Chats"
 var searchMode bool = false
@@ -44,15 +45,24 @@ var sessionManager *messages.SessionManager
 var keyBindings *cbind.Configuration
 var uiHandler messages.UiMessageHandler
 
+// uiGate is true while the lock screen or passphrase dialog owns the UI;
+// global shortcuts must not fire in that state (they could bypass the gate).
+var uiGate bool
+
 func main() {
+	flagProfile := parseProfileFlag()
 	config.InitConfig()
+	if flagProfile != "" {
+		config.Config.General.Profile = flagProfile
+		config.SaveGeneralKeys(map[string]string{"profile": flagProfile})
+	}
 	uiHandler = UiHandler{}
 	sessionManager = &messages.SessionManager{}
 	sessionManager.Init(uiHandler)
 
 	app = tview.NewApplication()
 	setTviewTheme()
-	gridLayout := tview.NewGrid()
+	gridLayout = tview.NewGrid()
 	gridLayout.SetRows(1, 0, 1)
 	gridLayout.SetColumns(config.Config.Ui.ChatSidebarWidth, 0, config.Config.Ui.ChatSidebarWidth)
 	gridLayout.SetBorders(true)
@@ -139,8 +149,13 @@ func main() {
 
 	PrintHelp()
 	app.SetRoot(gridLayout, true)
+	var lockInput *tview.InputField
 	if os.Getenv("WHATSCLI_DEBUG_BG") == "1" {
 		app.SetRoot(makeDebugBackgroundView(), true)
+	} else if config.Config.General.EnablePassphrase && config.Config.General.PassphraseHash != "" && config.SessionDbFileExists() {
+		var lockView tview.Primitive
+		lockView, lockInput = makeLockView()
+		app.SetRoot(lockView, true)
 	}
 	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
 		applyFocusVisuals()
@@ -148,7 +163,11 @@ func main() {
 		return false
 	})
 	app.EnableMouse(true)
-	app.SetFocus(textInput)
+	if lockInput != nil {
+		app.SetFocus(lockInput)
+	} else {
+		app.SetFocus(textInput)
+	}
 	if err := sessionManager.StartManager(); err != nil {
 		PrintError(err)
 	}
@@ -195,6 +214,177 @@ func setTviewTheme() {
 	tview.Styles.TertiaryTextColor = accent
 	tview.Styles.InverseTextColor = inverse
 	tview.Styles.ContrastSecondaryTextColor = inverse
+}
+
+// parseProfileFlag extracts --profile <name> from the command line, or "".
+func parseProfileFlag() string {
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--profile" && i+1 < len(os.Args) {
+			name := os.Args[i+1]
+			if !config.ValidProfileName(name) {
+				fmt.Fprintf(os.Stderr, "Invalid profile name %q (allowed: letters, digits, _ and -)\n", name)
+				os.Exit(1)
+			}
+			return name
+		}
+	}
+	return ""
+}
+
+// makeLockView builds the passphrase screen shown before the main UI when a
+// session is stored and a passphrase is set.
+func makeLockView() (tview.Primitive, *tview.InputField) {
+	uiGate = true
+	attempts := 0
+	label := tview.NewTextView().SetDynamicColors(true)
+	label.SetTextAlign(tview.AlignCenter)
+	label.SetText("[" + config.Config.Colors.ListHeader + "::b]WhatsCLI locked[-::-]\nEnter passphrase to unlock:")
+
+	input := tview.NewInputField()
+	input.SetMaskCharacter('*')
+	input.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEsc {
+			app.Stop()
+			return
+		}
+		pw := input.GetText()
+		input.SetText("")
+		if config.VerifyPassphrase(pw, config.Config.General.PassphraseHash) {
+			uiGate = false
+			app.SetRoot(gridLayout, true)
+			app.SetFocus(textInput)
+			return
+		}
+		attempts++
+		if attempts >= 3 {
+			app.Stop()
+			return
+		}
+		label.SetText(fmt.Sprintf("[%s::b]WhatsCLI locked[-::-]\nWrong passphrase (%d of 3), try again:", config.Config.Colors.Negative, attempts))
+	})
+
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex.AddItem(nil, 0, 1, false)
+	flex.AddItem(label, 3, 0, false)
+	flex.AddItem(input, 1, 0, true)
+	flex.AddItem(nil, 0, 2, false)
+	return flex, input
+}
+
+// showPassphraseDialog drives the set/change/remove passphrase flow.
+func showPassphraseDialog(remove bool) {
+	uiGate = true
+	hasHash := config.Config.General.PassphraseHash != ""
+	// step: 0 = verify current (only when hasHash), 1 = first new entry,
+	// 2 = repeat entry. flash shows a one-shot error prefix on the label.
+	step := 0
+	flash := ""
+	var newPw string
+
+	label := tview.NewTextView().SetDynamicColors(true)
+	label.SetTextAlign(tview.AlignCenter)
+	input := tview.NewInputField()
+	input.SetMaskCharacter('*')
+
+	backToMain := func() {
+		uiGate = false
+		app.SetRoot(gridLayout, true)
+		app.SetFocus(textInput)
+	}
+
+	updateLabel := func() {
+		prefix := ""
+		if flash != "" {
+			prefix = "[" + config.Config.Colors.Negative + "]" + flash + "[-] "
+			flash = ""
+		}
+		var text string
+		switch {
+		case remove:
+			text = "Enter current passphrase to disable the lock (Esc to cancel):"
+		case step == 0 && hasHash:
+			text = "Enter current passphrase (Esc to cancel):"
+		case step == 0:
+			text = "Enter new passphrase (Esc to cancel):"
+		case step == 1:
+			text = "Enter new passphrase (Esc to cancel):"
+		default:
+			text = "Repeat new passphrase (Esc to cancel):"
+		}
+		label.SetText(prefix + text)
+	}
+
+	input.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEsc {
+			backToMain()
+			return
+		}
+		pw := input.GetText()
+		input.SetText("")
+		switch {
+		case remove:
+			if !config.VerifyPassphrase(pw, config.Config.General.PassphraseHash) {
+				flash = "Wrong passphrase."
+				updateLabel()
+				return
+			}
+			config.Config.General.EnablePassphrase = false
+			config.Config.General.PassphraseHash = ""
+			config.SaveGeneralKeys(map[string]string{"enable_passphrase": "false", "passphrase_hash": ""})
+			backToMain()
+			PrintText("Passphrase removed, lock disabled")
+		case step == 0:
+			if hasHash {
+				// verify current passphrase before allowing a change
+				if !config.VerifyPassphrase(pw, config.Config.General.PassphraseHash) {
+					flash = "Wrong passphrase."
+					updateLabel()
+					return
+				}
+				step = 1
+			} else {
+				// no hash yet: this entry IS the new passphrase
+				if pw == "" {
+					flash = "Passphrase cannot be empty."
+					updateLabel()
+					return
+				}
+				newPw = pw
+				step = 2
+			}
+			updateLabel()
+		case step == 1: // first new entry
+			if pw == "" {
+				flash = "Passphrase cannot be empty."
+				updateLabel()
+				return
+			}
+			newPw = pw
+			step = 2
+			updateLabel()
+		default: // step 2: repeat
+			if pw != newPw {
+				flash = "Passphrases did not match."
+				step = 1
+				updateLabel()
+				return
+			}
+			config.Config.General.EnablePassphrase = true
+			config.Config.General.PassphraseHash = config.HashPassphrase(pw)
+			config.SaveGeneralKeys(map[string]string{"enable_passphrase": "true", "passphrase_hash": config.Config.General.PassphraseHash})
+			backToMain()
+			PrintText("Passphrase set, lock enabled")
+		}
+	})
+
+	updateLabel()
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex.AddItem(nil, 0, 1, false)
+	flex.AddItem(label, 3, 0, false)
+	flex.AddItem(input, 1, 0, true)
+	flex.AddItem(nil, 0, 2, false)
+	app.SetRoot(flex, true)
+	app.SetFocus(input)
 }
 
 func fillScreen(screen tcell.Screen, color tcell.Color) {
@@ -540,7 +730,14 @@ func LoadShortcuts() {
 	_ = keyBindings.Set(config.Config.Keymap.CommandQuit, handleQuit)
 	_ = keyBindings.Set(config.Config.Keymap.CommandHelp, handleHelp)
 	keyBindings.SetKey(tcell.ModNone, tcell.KeyF1, handleHelp)
-	app.SetInputCapture(keyBindings.Capture)
+	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if uiGate {
+			// Lock screen / passphrase dialog active: skip global shortcuts
+			// so e.g. the login keybind can't bypass the passphrase gate.
+			return event
+		}
+		return keyBindings.Capture(event)
+	})
 
 	keysMessages := cbind.NewConfiguration()
 	_ = keysMessages.Set(config.Config.Keymap.MessageDownload, handleMessageCommand("download"))
@@ -634,6 +831,8 @@ func PrintCommands() {
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"disconnect[::-] = Close the connection")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"logout[::-] = Remove login data from computer")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"reset[::-] = Remove stored session and reconnect cleanly")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"profile[::-] = List profiles; "+cmdPrefix+"profile [name[] = switch account session")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"passphrase[::-] = Set/change lock passphrase; "+cmdPrefix+"passphrase remove[::-] = disable")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"quit [::-]or[::b] "+config.Config.Keymap.CommandQuit+"[::-] = Exit app")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"notifications[::-] = toggle desktop notifications on/off (saved to config)")
 	fmt.Fprintln(textView, "Chat")
@@ -669,6 +868,21 @@ func EnterCommand(key tcell.Key) {
 	if sndTxt == cmdPrefix+"quit" {
 		sessionManager.CommandChannel <- messages.Command{"disconnect", nil}
 		app.Stop()
+		return
+	}
+	if sndTxt == cmdPrefix+"passphrase" || strings.HasPrefix(sndTxt, cmdPrefix+"passphrase ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(sndTxt, cmdPrefix+"passphrase"))
+		switch {
+		case arg == "remove" && config.Config.General.PassphraseHash == "":
+			PrintText("No passphrase set.")
+		case arg == "remove":
+			showPassphraseDialog(true)
+		case arg != "":
+			PrintText("Usage: " + cmdPrefix + "passphrase [remove]")
+		default:
+			showPassphraseDialog(false)
+		}
+		textInput.SetText("")
 		return
 	}
 	if strings.HasPrefix(sndTxt, cmdPrefix) {
@@ -884,6 +1098,16 @@ func (u UiHandler) SetChats(ids []messages.Chat) {
 		} else {
 			renderChatNodes(ids, "Chats")
 		}
+	})
+}
+func (u UiHandler) ResetChat() {
+	app.QueueUpdateDraw(func() {
+		currentReceiver = messages.Chat{}
+		curRegions = nil
+		helpVisible = false
+		textView.Clear()
+		clearChatSearch()
+		PrintHelp()
 	})
 }
 func (u UiHandler) PrintError(err error)  { PrintError(err) }
