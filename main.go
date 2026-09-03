@@ -470,13 +470,10 @@ func confirmDeleteProfile(name string) {
 // sidecars). If it was the active profile, the config pointer is cleared so
 // the next launch does not target a deleted file.
 func deleteProfile(name string) {
-	path := config.ProfileDbPath(name)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := config.RemoveProfileDb(name); err != nil && !os.IsNotExist(err) {
 		PrintError(fmt.Errorf("failed to delete profile %q: %v", name, err))
 		return
 	}
-	os.Remove(path + "-wal")
-	os.Remove(path + "-shm")
 	active := config.Config.General.Profile
 	if active == "" {
 		active = "default"

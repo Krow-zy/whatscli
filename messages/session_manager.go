@@ -640,8 +640,7 @@ func (sm *SessionManager) removeProfile(name string) {
 		sm.uiHandler.PrintError(fmt.Errorf("cannot remove the active profile %q — switch to another profile first", name))
 		return
 	}
-	path := config.ProfileDbPath(name)
-	if err := os.Remove(path); err != nil {
+	if err := config.RemoveProfileDb(name); err != nil {
 		if os.IsNotExist(err) {
 			sm.uiHandler.PrintError(fmt.Errorf("profile %q has no stored session", name))
 		} else {

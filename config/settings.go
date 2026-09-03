@@ -209,6 +209,17 @@ func ProfileDbPath(name string) string {
 	return filepath.Join(filepath.Dir(GetSessionFilePath()), "session."+name+".db")
 }
 
+// RemoveProfileDb deletes a profile's session DB and any sqlite sidecar
+// files. It returns the error from removing the main DB (os.IsNotExist when
+// the profile has no stored session); sidecar removal is best-effort.
+func RemoveProfileDb(name string) error {
+	path := ProfileDbPath(name)
+	err := os.Remove(path)
+	os.Remove(path + "-wal")
+	os.Remove(path + "-shm")
+	return err
+}
+
 // AvailableProfiles lists the profile names that have a stored session DB,
 // derived from the session*.db files in the config directory. The unnamed
 // profile is reported as "default".
