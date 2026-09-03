@@ -168,7 +168,11 @@ func main() {
 	} else {
 		app.SetFocus(textInput)
 	}
-	if err := sessionManager.StartManager(); err != nil {
+	// Gate up: no auto-connect. The manager must idle in its command loop
+	// until the picker resolves — booting straight into loginWithConnection
+	// would run the QR-wait on the manager goroutine (phantom profile with
+	// no stored device) and stall every queued command.
+	if err := sessionManager.StartManager(lockInput == nil); err != nil {
 		PrintError(err)
 	}
 	LoadShortcuts()
@@ -410,17 +414,14 @@ func showAccountPicker(notice string) {
 	title.SetText(text)
 
 	list := tview.NewList()
-	list.SetMainTextColor(uiColor(config.Config.Colors.Text))
-	list.SetSecondaryTextColor(uiColor(config.Config.Colors.Timestamp))
-	list.SetSelectedBackgroundColor(uiColor(config.Config.Colors.ListSelected))
-	list.SetBackgroundColor(uiColor(config.Config.Colors.Background))
 	for _, p := range profiles {
 		name := p
 		list.AddItem(name, "stored session", 0, func() {
 			enterMainUI()
-			if name != config.Config.General.Profile {
-				sessionManager.CommandChannel <- messages.Command{Name: "profile", Params: []string{name}}
-			}
+			// Always send: while the gate owns the boot flow nothing is
+			// connected yet, so even a selection matching the configured
+			// profile must trigger the login (switchProfile handles it).
+			sessionManager.CommandChannel <- messages.Command{Name: "profile", Params: []string{name}}
 		})
 	}
 	list.AddItem("+ New profile…", "enter a name and scan the QR", 'n', func() {
@@ -618,7 +619,7 @@ func handleSwitchPanels(ev *tcell.EventKey) *tcell.EventKey {
 }
 func handleCommand(command string) func(ev *tcell.EventKey) *tcell.EventKey {
 	return func(ev *tcell.EventKey) *tcell.EventKey {
-		sessionManager.CommandChannel <- messages.Command{command, nil}
+		sessionManager.CommandChannel <- messages.Command{Name: command, Params: nil}
 		return nil
 	}
 }
@@ -656,7 +657,7 @@ func safeReadClipboard() (clip string, err error) {
 	return clipboard.ReadAll("clipboard")
 }
 func handleQuit(ev *tcell.EventKey) *tcell.EventKey {
-	sessionManager.CommandChannel <- messages.Command{"disconnect", nil}
+	sessionManager.CommandChannel <- messages.Command{Name: "disconnect", Params: nil}
 	app.Stop()
 	return nil
 }
@@ -665,7 +666,7 @@ func handleMessageCommand(command string) func(ev *tcell.EventKey) *tcell.EventK
 	return func(ev *tcell.EventKey) *tcell.EventKey {
 		hls := textView.GetHighlights()
 		if len(hls) > 0 {
-			sessionManager.CommandChannel <- messages.Command{command, []string{hls[0]}}
+			sessionManager.CommandChannel <- messages.Command{Name: command, Params: []string{hls[0]}}
 			ResetMsgSelection()
 			app.SetFocus(textInput)
 		}
@@ -1004,7 +1005,7 @@ func EnterCommand(key tcell.Key) {
 		return
 	}
 	if sndTxt == cmdPrefix+"quit" {
-		sessionManager.CommandChannel <- messages.Command{"disconnect", nil}
+		sessionManager.CommandChannel <- messages.Command{Name: "disconnect", Params: nil}
 		app.Stop()
 		return
 	}
@@ -1031,7 +1032,7 @@ func EnterCommand(key tcell.Key) {
 			cmd = cmdParts[0]
 			params = cmdParts[1:]
 		}
-		sessionManager.CommandChannel <- messages.Command{cmd, params}
+		sessionManager.CommandChannel <- messages.Command{Name: cmd, Params: params}
 		textInput.SetText("")
 		return
 	}
@@ -1179,7 +1180,7 @@ func SetDisplayedChat(wid messages.Chat) {
 	helpVisible = false
 	textView.Clear()
 	textView.SetTitle(wid.Name)
-	sessionManager.CommandChannel <- messages.Command{"select", []string{currentReceiver.Id}}
+	sessionManager.CommandChannel <- messages.Command{Name: "select", Params: []string{currentReceiver.Id}}
 	app.SetFocus(textInput)
 	UpdateStatusBar(messages.SessionStatus{})
 }

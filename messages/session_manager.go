@@ -66,28 +66,36 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.eventHandler = &eventHandler{sm: sm}
 }
 
-// StartManager starts the receiver and message handling goroutine.
-func (sm *SessionManager) StartManager() error {
+// StartManager starts the receiver and message handling goroutine. With
+// autoConnect the manager connects immediately using the configured
+// profile; otherwise it idles in the command loop until the UI sends a
+// "profile"/"connect" command. The passphrase gate passes false: running
+// loginWithConnection at boot would enter the QR-wait loop on THIS
+// goroutine when the configured profile has no stored device, and every
+// queued command (profile switch, backlog, deleteprofile) would stall.
+func (sm *SessionManager) StartManager(autoConnect bool) error {
 	if sm.started {
 		return errors.New("session manager running, send commands to control")
 	}
 	sm.started = true
-	go sm.runManager()
+	go sm.runManager(autoConnect)
 	return nil
 }
 
-func (sm *SessionManager) runManager() error {
-	client, err := sm.getConnection()
-	if err != nil {
-		sm.uiHandler.PrintError(fmt.Errorf("failed to create WhatsApp connection: %v", err))
-		return err
-	}
-	if client == nil {
-		return errors.New("could not establish WhatsApp connection")
-	}
+func (sm *SessionManager) runManager(autoConnect bool) error {
+	if autoConnect {
+		client, err := sm.getConnection()
+		if err != nil {
+			sm.uiHandler.PrintError(fmt.Errorf("failed to create WhatsApp connection: %v", err))
+			return err
+		}
+		if client == nil {
+			return errors.New("could not establish WhatsApp connection")
+		}
 
-	if err = sm.loginWithConnection(client); err != nil {
-		sm.uiHandler.PrintError(err)
+		if err = sm.loginWithConnection(client); err != nil {
+			sm.uiHandler.PrintError(err)
+		}
 	}
 
 	for sm.started {
