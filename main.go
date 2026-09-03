@@ -250,9 +250,8 @@ func makeLockView() (tview.Primitive, *tview.InputField) {
 		pw := input.GetText()
 		input.SetText("")
 		if config.VerifyPassphrase(pw, config.Config.General.PassphraseHash) {
-			uiGate = false
-			app.SetRoot(gridLayout, true)
-			app.SetFocus(textInput)
+			// uiGate stays true: the account picker is part of the gate.
+			showAccountPicker()
 			return
 		}
 		attempts++
@@ -381,6 +380,98 @@ func showPassphraseDialog(remove bool) {
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
 	flex.AddItem(nil, 0, 1, false)
 	flex.AddItem(label, 3, 0, false)
+	flex.AddItem(input, 1, 0, true)
+	flex.AddItem(nil, 0, 2, false)
+	app.SetRoot(flex, true)
+	app.SetFocus(input)
+}
+
+// showAccountPicker displays the saved profiles after the passphrase gate and
+// enters the main UI with the chosen profile. Part of the uiGate: global
+// shortcuts stay disabled until a selection resolves.
+func showAccountPicker() {
+	profiles := config.AvailableProfiles()
+	if len(profiles) <= 1 {
+		// nothing meaningful to pick — straight into the UI
+		uiGate = false
+		app.SetRoot(gridLayout, true)
+		app.SetFocus(textInput)
+		return
+	}
+
+	title := tview.NewTextView().SetDynamicColors(true)
+	title.SetTextAlign(tview.AlignCenter)
+	title.SetText("[" + config.Config.Colors.ListHeader + "::b]Choose account[-::-]\n(↑/↓ + Enter, n = new profile, Esc = quit)")
+
+	list := tview.NewList()
+	list.SetMainTextColor(uiColor(config.Config.Colors.Text))
+	list.SetSecondaryTextColor(uiColor(config.Config.Colors.Timestamp))
+	list.SetSelectedBackgroundColor(uiColor(config.Config.Colors.ListSelected))
+	list.SetBackgroundColor(uiColor(config.Config.Colors.Background))
+	for _, p := range profiles {
+		name := p
+		list.AddItem(name, "stored session", 0, func() {
+			enterMainUI()
+			if name != config.Config.General.Profile {
+				sessionManager.CommandChannel <- messages.Command{Name: "profile", Params: []string{name}}
+			}
+		})
+	}
+	list.AddItem("+ New profile…", "enter a name and scan the QR", 'n', func() {
+		showNewProfileInput()
+	})
+	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			app.Stop()
+			return nil
+		}
+		return event
+	})
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex.AddItem(nil, 0, 1, false)
+	flex.AddItem(title, 3, 0, false)
+	flex.AddItem(list, 0, 1, true)
+	flex.AddItem(nil, 0, 1, false)
+	app.SetRoot(flex, true)
+	app.SetFocus(list)
+}
+
+// enterMainUI leaves the gate and shows the main interface.
+func enterMainUI() {
+	uiGate = false
+	app.SetRoot(gridLayout, true)
+	app.SetFocus(textInput)
+}
+
+// showNewProfileInput asks for a new profile name and switches to it,
+// which triggers the QR login for the fresh account.
+func showNewProfileInput() {
+	title := tview.NewTextView().SetDynamicColors(true)
+	title.SetTextAlign(tview.AlignCenter)
+	title.SetText("[" + config.Config.Colors.ListHeader + "::b]New profile name[-::-]\n(letters, digits, _ and -; Enter to create, Esc to cancel)")
+
+	input := tview.NewInputField()
+	input.SetLabel("Name: ")
+	input.SetFieldBackgroundColor(uiColor(config.Config.Colors.InputBackground))
+	input.SetFieldTextColor(uiColor(config.Config.Colors.InputText))
+	input.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
+	input.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEsc {
+			showAccountPicker()
+			return
+		}
+		name := strings.TrimSpace(input.GetText())
+		if !config.ValidProfileName(name) {
+			title.SetText("[" + config.Config.Colors.Negative + "]Invalid name[-::-]\n(letters, digits, _ and -; Enter to create, Esc to cancel)")
+			return
+		}
+		enterMainUI()
+		sessionManager.CommandChannel <- messages.Command{Name: "profile", Params: []string{name}}
+	})
+
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex.AddItem(nil, 0, 1, false)
+	flex.AddItem(title, 3, 0, false)
 	flex.AddItem(input, 1, 0, true)
 	flex.AddItem(nil, 0, 2, false)
 	app.SetRoot(flex, true)
@@ -836,7 +927,7 @@ func PrintCommands() {
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"quit [::-]or[::b] "+config.Config.Keymap.CommandQuit+"[::-] = Exit app")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"notifications[::-] = toggle desktop notifications on/off (saved to config)")
 	fmt.Fprintln(textView, "Chat")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"backlog [::-]or[::b] "+config.Config.Keymap.CommandBacklog+"[::-] = load next "+fmt.Sprint(config.Config.General.BacklogMsgQuantity)+" previous messages")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"backlog [minutes][::-]or[::b] "+config.Config.Keymap.CommandBacklog+"[::-] = load history; /backlog 60 loads the last 60 minutes, plain = "+fmt.Sprint(config.Config.General.BacklogMsgQuantity)+" messages")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"read [::-]or[::b] "+config.Config.Keymap.CommandRead+"[::-] = mark new messages in chat as read")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"upload[::-] /path/to/file = Upload any file as document")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"sendimage[::-] /path/to/file = Send image message")

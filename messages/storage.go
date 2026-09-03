@@ -28,6 +28,33 @@ func (md *MessageDatabase) Init() {
 	md.contacts = make(map[string]Contact)
 }
 
+// TrimMessagesBefore removes stored messages older than the given unix
+// timestamp for one chat and returns how many were removed.
+func (md *MessageDatabase) TrimMessagesBefore(chatId string, cutoffUnix int64) int {
+	md.messageLock.Lock()
+	defer md.messageLock.Unlock()
+	msgs, ok := md.messages[chatId]
+	if !ok {
+		return 0
+	}
+	kept := make([]Message, 0, len(msgs))
+	removed := 0
+	for _, m := range msgs {
+		if int64(m.Timestamp) < cutoffUnix {
+			delete(md.messagesById, m.Id)
+			removed++
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if len(kept) == 0 {
+		delete(md.messages, chatId)
+	} else {
+		md.messages[chatId] = kept
+	}
+	return removed
+}
+
 // Reset reinitialises the message database, holding all synchronisation locks.
 func (md *MessageDatabase) Reset() {
 	md.messageLock.Lock()

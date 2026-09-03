@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/adrg/xdg"
 	"gopkg.in/ini.v1"
@@ -32,6 +34,7 @@ type General struct {
 	UseTerminalBell     bool
 	NotificationTimeout int64
 	BacklogMsgQuantity  int
+	HistoryWindowMin    int64
 	ChatListMode        string
 	EnableDiagnostics   bool
 	DebugInputEvents    bool
@@ -97,6 +100,7 @@ var Config = IniFile{
 		UseTerminalBell:     false,
 		NotificationTimeout: 60,
 		BacklogMsgQuantity:  10,
+		HistoryWindowMin:    0,
 		ChatListMode:        "recency_only",
 		EnableDiagnostics:   false,
 		DebugInputEvents:    false,
@@ -184,13 +188,38 @@ func SaveNotifications(enabled bool) {
 
 func GetSessionFilePath() string {
 	name := "session"
-	if Config.General.Profile != "" {
-		name = "session." + Config.General.Profile
+	// "default" is an alias for the unnamed profile: both map to session.db,
+	// so "/profile default" returns to the original account instead of
+	// creating an empty session.default.db.
+	if p := Config.General.Profile; p != "" && p != "default" {
+		name = "session." + p
 	}
 	if sessionFilePath, err := xdg.ConfigFile("whatscli/" + name); err == nil {
 		return sessionFilePath
 	}
 	return GetHomeDir() + "." + name
+}
+
+// AvailableProfiles lists the profile names that have a stored session DB,
+// derived from the session*.db files in the config directory. The unnamed
+// profile is reported as "default".
+func AvailableProfiles() []string {
+	dir := filepath.Dir(GetSessionFilePath())
+	files, err := filepath.Glob(filepath.Join(dir, "session*.db"))
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		name := strings.TrimSuffix(filepath.Base(f), ".db")
+		if name == "session" {
+			name = "default"
+		} else {
+			name = strings.TrimPrefix(name, "session.")
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // ValidProfileName reports whether name is safe to embed in a session file path.

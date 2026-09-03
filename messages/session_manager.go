@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/rivo/tview"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -311,7 +313,7 @@ func (sm *SessionManager) loadContacts() {
 }
 
 func (sm *SessionManager) getChatName(jid types.JID) string {
-	if jid.Server == types.GroupServer {
+	if sm.client != nil && jid.Server == types.GroupServer {
 		groupInfo, err := sm.client.GetGroupInfo(context.Background(), jid)
 		if err == nil && groupInfo.Name != "" {
 			return groupInfo.Name
@@ -363,7 +365,7 @@ func (sm *SessionManager) execCommand(command Command) {
 	default:
 		sm.uiHandler.PrintText("[" + config.Config.Colors.Negative + "]Unknown command: [-]" + command.Name)
 	case "backlog":
-		sm.loadBacklog()
+		sm.loadBacklog(command.Params)
 	case "login", "connect":
 		err := sm.login()
 		if err != nil {
@@ -446,13 +448,17 @@ func (sm *SessionManager) execCommand(command Command) {
 		}
 		sm.uiHandler.PrintText(out)
 	case "more":
-		sm.loadBacklog()
+		sm.loadBacklog(nil)
 	}
 }
 
-func (sm *SessionManager) loadBacklog() {
+// loadBacklog requests chat history older than the oldest locally stored
+// message from the phone. An optional minutes parameter bounds the request:
+// messages older than that window are discarded after ingestion. Without a
+// parameter one batch of BacklogMsgQuantity messages is requested.
+func (sm *SessionManager) loadBacklog(params []string) {
 	if sm.currentReceiver == "" {
-		sm.printCommandUsage("backlog", "-> only works in a chat")
+		sm.printCommandUsage("backlog", "[minutes] -> only works in a chat")
 		return
 	}
 	if sm.client == nil || !sm.client.IsConnected() {
@@ -466,51 +472,91 @@ func (sm *SessionManager) loadBacklog() {
 		return
 	}
 
-	existingMessages := sm.db.GetMessages(sm.currentReceiver)
-	sm.uiHandler.PrintText("Retrieving message history...")
-
-	oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver)
-	if !ok {
-		sm.uiHandler.PrintText("No local message anchor found yet. Open the chat after WhatsApp sync delivers some history, then try /backlog again.")
-		sm.uiHandler.NewScreen(existingMessages)
-		return
-	}
-
-	senderJID := types.EmptyJID
-	if oldest.SenderId != "" {
-		if parsedSender, parseErr := types.ParseJID(oldest.SenderId); parseErr == nil {
-			senderJID = parsedSender
+	// /backlog <minutes> bounds the fetch; without an argument the
+	// history_window_min config value applies (0 = plain one-batch mode).
+	windowMinutes := config.Config.General.HistoryWindowMin
+	if len(params) > 0 {
+		windowMinutes, err = strconv.ParseInt(params[0], 10, 64)
+		if err != nil || windowMinutes < 0 {
+			sm.printCommandUsage("backlog", "[minutes]")
+			return
 		}
 	}
-	req := sm.client.BuildHistorySyncRequest(&types.MessageInfo{
-		MessageSource: types.MessageSource{
-			Chat:     jid,
-			Sender:   senderJID,
-			IsFromMe: oldest.FromMe,
-			IsGroup:  strings.Contains(sm.currentReceiver, GROUPSUFFIX),
-		},
-		ID:        types.MessageID(oldest.Id),
-		Timestamp: time.Unix(int64(oldest.Timestamp), 0),
-	}, config.Config.General.BacklogMsgQuantity)
-	if _, err = sm.client.SendPeerMessage(context.Background(), req); err != nil {
-		sm.uiHandler.PrintError(fmt.Errorf("failed to request message history: %v", err))
-		sm.uiHandler.NewScreen(existingMessages)
-		return
+
+	if windowMinutes > 0 {
+		sm.uiHandler.PrintText(fmt.Sprintf("Retrieving message history for the last %d minute(s)...", windowMinutes))
+	} else {
+		sm.uiHandler.PrintText("Retrieving message history...")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for len(sm.db.GetMessages(sm.currentReceiver)) == len(existingMessages) && time.Now().Before(deadline) {
-		time.Sleep(250 * time.Millisecond)
+	// The on-demand protocol fetches a fixed number of messages before an
+	// anchor message. With no local anchor (clean session) send an empty
+	// anchor so the phone returns the newest messages.
+	deadline := time.Now().Add(60 * time.Second)
+	loadedTotal := 0
+	for {
+		before := len(sm.db.GetMessages(sm.currentReceiver))
+		anchor := types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:    jid,
+				IsGroup: strings.Contains(sm.currentReceiver, GROUPSUFFIX),
+			},
+		}
+		if oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver); ok {
+			anchor.ID = types.MessageID(oldest.Id)
+			anchor.IsFromMe = oldest.FromMe
+			anchor.Timestamp = time.Unix(int64(oldest.Timestamp), 0)
+			if oldest.SenderId != "" {
+				if parsedSender, parseErr := types.ParseJID(oldest.SenderId); parseErr == nil {
+					anchor.Sender = parsedSender
+				}
+			}
+		} else {
+			anchor.Timestamp = time.Now()
+		}
+		req := sm.client.BuildHistorySyncRequest(&anchor, 50)
+		if _, err := sm.client.SendPeerMessage(context.Background(), req); err != nil {
+			sm.uiHandler.PrintError(fmt.Errorf("failed to request message history: %v", err))
+			break
+		}
+
+		wait := time.Now().Add(5 * time.Second)
+		for len(sm.db.GetMessages(sm.currentReceiver)) == before && time.Now().Before(wait) {
+			time.Sleep(250 * time.Millisecond)
+		}
+		got := len(sm.db.GetMessages(sm.currentReceiver)) - before
+		if got <= 0 {
+			if loadedTotal == 0 {
+				sm.uiHandler.PrintText("No additional messages found. WhatsApp may limit history access.")
+			}
+			break
+		}
+		loadedTotal += got
+
+		if windowMinutes <= 0 {
+			// plain /backlog: one batch, like before
+			break
+		}
+		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
+		if oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver); !ok || int64(oldest.Timestamp) <= cutoff.Unix() {
+			// reached past the requested window
+			break
+		}
+		if time.Now().After(deadline) {
+			sm.uiHandler.PrintText("Stopped: took too long; run /backlog again to continue.")
+			break
+		}
 	}
 
-	if len(sm.db.GetMessages(sm.currentReceiver)) == len(existingMessages) {
-		sm.uiHandler.PrintText("Requested older messages from WhatsApp. Waiting for sync response.")
+	if windowMinutes > 0 {
+		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
+		sm.db.TrimMessagesBefore(sm.currentReceiver, cutoff.Unix())
 	}
 
 	updated := sm.db.GetMessages(sm.currentReceiver)
-	if len(updated) > len(existingMessages) {
-		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d additional messages", len(updated)-len(existingMessages)))
-	} else {
+	if loadedTotal > 0 {
+		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d additional messages", loadedTotal))
+	} else if windowMinutes > 0 {
 		sm.uiHandler.PrintText("No additional messages found. WhatsApp may limit history access.")
 	}
 	sm.uiHandler.NewScreen(updated)
@@ -547,19 +593,7 @@ func (sm *SessionManager) profileCommand(params []string) {
 		}
 		sm.uiHandler.PrintText("Active profile: " + current)
 		sm.uiHandler.PrintText("Available profiles:")
-		dir := filepath.Dir(config.GetSessionFilePath())
-		files, err := filepath.Glob(filepath.Join(dir, "session*.db"))
-		if err != nil || len(files) == 0 {
-			sm.uiHandler.PrintText("  (none)")
-			return
-		}
-		for _, f := range files {
-			name := strings.TrimSuffix(filepath.Base(f), ".db")
-			if name == "session" {
-				name = "default"
-			} else {
-				name = strings.TrimPrefix(name, "session.")
-			}
+		for _, name := range config.AvailableProfiles() {
 			sm.uiHandler.PrintText("  - " + name)
 		}
 		return
@@ -1147,45 +1181,35 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 	if evt == nil || evt.Data == nil {
 		return
 	}
-
+	// WhatsApp's phone pushes the full history in chained chunks
+	// (INITIAL_BOOTSTRAP, RECENT, FULL, ...). Ingesting those floods the
+	// transcript with days-old messages on every session. Chat history is
+	// loaded manually via /backlog, which the server answers with an
+	// ON_DEMAND sync — that is the only type we import.
+	if evt.Data.GetSyncType() != waHistorySync.HistorySync_ON_DEMAND {
+		// Still import conversation metadata so the sidebar lists chats
+		// (names, unread counts, mute state) without their old messages.
+		for _, conv := range evt.Data.GetConversations() {
+			eh.importChatMetadata(conv)
+		}
+		eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
+		return
+	}
 	for _, conv := range evt.Data.GetConversations() {
-		chatID := conv.GetID()
-		if chatID == "" {
-			chatID = conv.GetNewJID()
-		}
-		if chatID == "" {
-			continue
-		}
-
-		chatJID, err := types.ParseJID(chatID)
-		if err != nil {
-			continue
-		}
-
-		chatName := conv.GetName()
-		if chatName == "" {
-			chatName = conv.GetDisplayName()
-		}
-		if chatName == "" {
-			chatName = eh.sm.getChatName(chatJID)
-		}
-
-		lastMessage := int64(conv.GetLastMsgTimestamp())
-		if lastMessage == 0 {
-			lastMessage = int64(conv.GetConversationTimestamp())
-		}
-		eh.sm.db.AddChat(Chat{
-			Id:          chatID,
-			IsGroup:     chatJID.Server == types.GroupServer,
-			Name:        chatName,
-			Unread:      int(conv.GetUnreadCount()),
-			LastMessage: lastMessage,
-			MutedUntil:  int64(conv.GetMuteEndTime()),
-		})
+		eh.importChatMetadata(conv)
 
 		for _, histMsg := range conv.GetMessages() {
 			webMsg := histMsg.GetMessage()
 			if webMsg == nil {
+				continue
+			}
+			chatJID, err := types.ParseJID(conv.GetID())
+			if err != nil {
+				continue
+			}
+			if eh.sm.client == nil {
+				// History sync can arrive while the client is torn down
+				// (profile switch); nothing to parse against.
 				continue
 			}
 			parsed, err := eh.sm.client.ParseWebMessage(chatJID, webMsg)
@@ -1198,13 +1222,49 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 			}
 			eh.sm.db.AddMessage(msg, false)
 		}
-		eh.sm.db.UpdateChatUnread(chatID, int(conv.GetUnreadCount()))
+		eh.sm.db.UpdateChatUnread(conv.GetID(), int(conv.GetUnreadCount()))
 	}
 
 	eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 	if eh.sm.currentReceiver != "" {
 		eh.sm.uiHandler.NewScreen(eh.sm.getMessages(eh.sm.currentReceiver))
 	}
+}
+
+// importChatMetadata records a history-sync conversation's sidebar state
+// (name, unread count, mute, last-activity timestamp) without importing any
+// of its messages.
+func (eh *eventHandler) importChatMetadata(conv *waHistorySync.Conversation) {
+	chatID := conv.GetID()
+	if chatID == "" {
+		chatID = conv.GetNewJID()
+	}
+	if chatID == "" {
+		return
+	}
+	chatJID, err := types.ParseJID(chatID)
+	if err != nil {
+		return
+	}
+	chatName := conv.GetName()
+	if chatName == "" {
+		chatName = conv.GetDisplayName()
+	}
+	if chatName == "" {
+		chatName = eh.sm.getChatName(chatJID)
+	}
+	lastMessage := int64(conv.GetLastMsgTimestamp())
+	if lastMessage == 0 {
+		lastMessage = int64(conv.GetConversationTimestamp())
+	}
+	eh.sm.db.AddChat(Chat{
+		Id:          chatID,
+		IsGroup:     chatJID.Server == types.GroupServer,
+		Name:        chatName,
+		Unread:      int(conv.GetUnreadCount()),
+		LastMessage: lastMessage,
+		MutedUntil:  int64(conv.GetMuteEndTime()),
+	})
 }
 
 func (eh *eventHandler) normalizeEventMessage(evt *events.Message) (Message, string, bool) {

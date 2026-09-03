@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGeneralDefaults(t *testing.T) {
 	ApplyTheme(RetroTheme())
@@ -36,5 +39,31 @@ func TestGeneralDefaults(t *testing.T) {
 	}
 	if Config.General.PassphraseHash != "" {
 		t.Fatalf("expected empty passphrase hash by default")
+	}
+}
+
+// "default" must map to the unnamed profile's session.db, not create an
+// empty session.default.db — regression for the /profile default bug.
+func TestProfileDefaultAlias(t *testing.T) {
+	orig := Config.General.Profile
+	defer func() { Config.General.Profile = orig }()
+
+	Config.General.Profile = "default"
+	p := GetSessionFilePath()
+	if strings.HasSuffix(p, "session.default") {
+		t.Fatalf("default alias must not create session.default, got %q", p)
+	}
+	if !strings.HasSuffix(p, "session") {
+		t.Fatalf("default alias must resolve to the unnamed session path, got %q", p)
+	}
+
+	Config.General.Profile = ""
+	if !strings.HasSuffix(GetSessionFilePath(), "session") {
+		t.Fatalf("empty profile must resolve to the unnamed session path")
+	}
+
+	Config.General.Profile = "kantor"
+	if !strings.HasSuffix(GetSessionFilePath(), "session.kantor") {
+		t.Fatalf("named profile must resolve to session.kantor")
 	}
 }
