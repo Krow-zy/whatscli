@@ -34,21 +34,22 @@ var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
 
 // SessionManager deals with the connection and receives commands from the UI.
 type SessionManager struct {
-	db              *MessageDatabase
-	currentReceiver string
-	uiHandler       UiMessageHandler
-	client          *whatsmeow.Client
-	container       *sqlstore.Container
-	BatteryChannel  chan BatteryMsg
-	StatusChannel   chan StatusMsg
-	CommandChannel  chan Command
-	ChatChannel     chan Chat
-	ContactChannel  chan Contact
-	TextChannel     chan *waProto.Message
-	statusInfo      SessionStatus
-	lastSent        time.Time
-	started         bool
-	eventHandler    *eventHandler
+	db               *MessageDatabase
+	currentReceiver  string
+	uiHandler        UiMessageHandler
+	client           *whatsmeow.Client
+	container        *sqlstore.Container
+	BatteryChannel   chan BatteryMsg
+	StatusChannel    chan StatusMsg
+	CommandChannel   chan Command
+	ChatChannel      chan Chat
+	ContactChannel   chan Contact
+	TextChannel      chan *waProto.Message
+	deleteResultChan chan ProfileDeleteResult
+	statusInfo       SessionStatus
+	lastSent         time.Time
+	started          bool
+	eventHandler     *eventHandler
 }
 
 // Init initializes the SessionManager.
@@ -60,8 +61,8 @@ func (sm *SessionManager) Init(handler UiMessageHandler) {
 	sm.StatusChannel = make(chan StatusMsg, 10)
 	sm.CommandChannel = make(chan Command, 10)
 	sm.ChatChannel = make(chan Chat, 10)
-	sm.ContactChannel = make(chan Contact, 10)
 	sm.TextChannel = make(chan *waProto.Message, 10)
+	sm.deleteResultChan = make(chan ProfileDeleteResult, 1)
 	sm.eventHandler = &eventHandler{sm: sm}
 }
 
@@ -385,6 +386,12 @@ func (sm *SessionManager) execCommand(command Command) {
 		} else {
 			sm.uiHandler.PrintText("desktop notifications disabled (saved to config)")
 		}
+	case "deleteprofile":
+		// Runs on the manager goroutine: releasing the active profile's DB
+		// handle is safe here, and the picker waits for the result channel
+		// instead of calling teardownProfile on the UI goroutine (which
+		// would deadlock in ResetChat's QueueUpdateDraw).
+		sm.deleteProfile(command.Params)
 	case "disconnect":
 		sm.uiHandler.PrintError(sm.disconnect())
 	case "logout":
@@ -649,6 +656,57 @@ func (sm *SessionManager) removeProfile(name string) {
 		return
 	}
 	sm.uiHandler.PrintText(fmt.Sprintf("Profile %q removed (local session file deleted)", name))
+}
+
+// ProfileDeleteResult reports the outcome of a picker-initiated profile
+// deletion that ran on the manager goroutine.
+type ProfileDeleteResult struct {
+	Name string
+	Err  error
+}
+
+// deleteProfile handles the "deleteprofile" command sent by the account
+// picker. Unlike /profile remove it may delete the ACTIVE profile: the
+// manager goroutine tears down the connection and releases the sqlite
+// handle first, so the file is not locked and the removal succeeds. The
+// result is delivered on sm.deleteResultChan (buffered, size 1) so the
+// picker can wait for completion before rebuilding the list.
+func (sm *SessionManager) deleteProfile(params []string) {
+	if !checkParam(params, 1) {
+		return
+	}
+	name := params[0]
+	if !config.ValidProfileName(name) {
+		sm.sendDeleteResult(name, fmt.Errorf("invalid profile name %q (allowed: letters, digits, _ and -)", name))
+		return
+	}
+	// Release the DB handle the manager holds for the active profile so
+	// os.Remove can succeed on Windows. Safe here: manager goroutine.
+	sm.teardownProfile()
+	err := config.RemoveProfileDb(name)
+	if err == nil {
+		// Only clear the pointer once the file is really gone, so a failed
+		// removal never leaves the config pointing at a deleted DB.
+		if p := config.Config.General.Profile; p == name || (p == "" && name == "default") {
+			config.Config.General.Profile = ""
+			config.SaveGeneralKeys(map[string]string{"profile": ""})
+		}
+	}
+	sm.sendDeleteResult(name, err)
+}
+
+// DeleteResultChan exposes the buffered channel the picker waits on for a
+// "deleteprofile" outcome.
+func (sm *SessionManager) DeleteResultChan() <-chan ProfileDeleteResult {
+	return sm.deleteResultChan
+}
+
+// sendDeleteResult delivers a deletion result to the picker waiting on the
+// buffered deleteResultChan.
+func (sm *SessionManager) sendDeleteResult(name string, err error) {
+	if sm.deleteResultChan != nil {
+		sm.deleteResultChan <- ProfileDeleteResult{Name: name, Err: err}
+	}
 }
 
 // switchProfile tears down the current connection and switches to another

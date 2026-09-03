@@ -251,7 +251,7 @@ func makeLockView() (tview.Primitive, *tview.InputField) {
 		input.SetText("")
 		if config.VerifyPassphrase(pw, config.Config.General.PassphraseHash) {
 			// uiGate stays true: the account picker is part of the gate.
-			showAccountPicker()
+			showAccountPicker("")
 			return
 		}
 		attempts++
@@ -388,8 +388,10 @@ func showPassphraseDialog(remove bool) {
 
 // showAccountPicker displays the saved profiles after the passphrase gate and
 // enters the main UI with the chosen profile. Part of the uiGate: global
-// shortcuts stay disabled until a selection resolves.
-func showAccountPicker() {
+// shortcuts stay disabled until a selection resolves. A non-empty notice is
+// shown above the list — picker-local errors must surface here because the
+// main transcript is hidden while the gate is up.
+func showAccountPicker(notice string) {
 	profiles := config.AvailableProfiles()
 	if len(profiles) <= 1 {
 		// nothing meaningful to pick — straight into the UI
@@ -401,7 +403,11 @@ func showAccountPicker() {
 
 	title := tview.NewTextView().SetDynamicColors(true)
 	title.SetTextAlign(tview.AlignCenter)
-	title.SetText("[" + config.Config.Colors.ListHeader + "::b]Choose account[-::-]\n(↑/↓ + Enter, n = new profile, r = delete, Esc = quit)")
+	text := "[" + config.Config.Colors.ListHeader + "::b]Choose account[-::-]\n(↑/↓ + Enter, n = new profile, r = delete, Esc = quit)"
+	if notice != "" {
+		text = "[" + config.Config.Colors.Negative + "]" + notice + "[-]\n" + text
+	}
+	title.SetText(text)
 
 	list := tview.NewList()
 	list.SetMainTextColor(uiColor(config.Config.Colors.Text))
@@ -451,37 +457,37 @@ func enterMainUI() {
 }
 
 // confirmDeleteProfile asks before wiping a profile's stored session so a
-// stray keypress cannot delete an account.
+// stray keypress cannot delete an account. The deletion itself runs on the
+// manager goroutine ("deleteprofile" command) — releasing the active
+// profile's sqlite handle must not happen on the UI goroutine, and
+// teardownProfile's ResetChat would deadlock if it did.
 func confirmDeleteProfile(name string) {
 	modal := tview.NewModal().
 		SetText(fmt.Sprintf("Delete profile %q and its stored session/history?\nA later login to this name starts from a clean database.\nThis cannot be undone.", name)).
 		AddButtons([]string{"Delete", "Cancel"}).
 		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 			if buttonLabel == "Delete" {
-				deleteProfile(name)
+				// Fire-and-forget: the manager replies on its buffered
+				// result channel and this goroutine then rebuilds the
+				// picker with the outcome. Waiting here would deadlock:
+				// teardownProfile queues UI work that only this loop can run.
+				go func(n string) {
+					sessionManager.CommandChannel <- messages.Command{Name: "deleteprofile", Params: []string{n}}
+					res := <-sessionManager.DeleteResultChan()
+					var notice string
+					if res.Err != nil && !os.IsNotExist(res.Err) {
+						notice = fmt.Sprintf("failed to delete profile %q: %v", res.Name, res.Err)
+					}
+					app.QueueUpdateDraw(func() {
+						showAccountPicker(notice)
+					})
+				}(name)
+				return
 			}
-			showAccountPicker()
+			showAccountPicker("")
 		})
 	app.SetRoot(modal, false)
 	app.SetFocus(modal)
-}
-
-// deleteProfile removes a profile's local session DB (plus any sqlite
-// sidecars). If it was the active profile, the config pointer is cleared so
-// the next launch does not target a deleted file.
-func deleteProfile(name string) {
-	if err := config.RemoveProfileDb(name); err != nil && !os.IsNotExist(err) {
-		PrintError(fmt.Errorf("failed to delete profile %q: %v", name, err))
-		return
-	}
-	active := config.Config.General.Profile
-	if active == "" {
-		active = "default"
-	}
-	if name == active {
-		config.Config.General.Profile = ""
-		config.SaveGeneralKeys(map[string]string{"profile": ""})
-	}
 }
 
 // showNewProfileInput asks for a new profile name and switches to it,
@@ -498,7 +504,7 @@ func showNewProfileInput() {
 	input.SetLabelColor(uiColor(config.Config.Colors.ListHeader))
 	input.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEsc {
-			showAccountPicker()
+			showAccountPicker("")
 			return
 		}
 		name := strings.TrimSpace(input.GetText())
