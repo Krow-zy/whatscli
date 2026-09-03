@@ -401,7 +401,7 @@ func showAccountPicker() {
 
 	title := tview.NewTextView().SetDynamicColors(true)
 	title.SetTextAlign(tview.AlignCenter)
-	title.SetText("[" + config.Config.Colors.ListHeader + "::b]Choose account[-::-]\n(↑/↓ + Enter, n = new profile, Esc = quit)")
+	title.SetText("[" + config.Config.Colors.ListHeader + "::b]Choose account[-::-]\n(↑/↓ + Enter, n = new profile, r = delete, Esc = quit)")
 
 	list := tview.NewList()
 	list.SetMainTextColor(uiColor(config.Config.Colors.Text))
@@ -425,6 +425,13 @@ func showAccountPicker() {
 			app.Stop()
 			return nil
 		}
+		if event.Rune() == 'r' {
+			idx := list.GetCurrentItem()
+			if idx >= 0 && idx < len(profiles) {
+				confirmDeleteProfile(profiles[idx])
+			}
+			return nil
+		}
 		return event
 	})
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
@@ -441,6 +448,43 @@ func enterMainUI() {
 	uiGate = false
 	app.SetRoot(gridLayout, true)
 	app.SetFocus(textInput)
+}
+
+// confirmDeleteProfile asks before wiping a profile's stored session so a
+// stray keypress cannot delete an account.
+func confirmDeleteProfile(name string) {
+	modal := tview.NewModal().
+		SetText(fmt.Sprintf("Delete profile %q and its stored session/history?\nA later login to this name starts from a clean database.\nThis cannot be undone.", name)).
+		AddButtons([]string{"Delete", "Cancel"}).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == "Delete" {
+				deleteProfile(name)
+			}
+			showAccountPicker()
+		})
+	app.SetRoot(modal, false)
+	app.SetFocus(modal)
+}
+
+// deleteProfile removes a profile's local session DB (plus any sqlite
+// sidecars). If it was the active profile, the config pointer is cleared so
+// the next launch does not target a deleted file.
+func deleteProfile(name string) {
+	path := config.ProfileDbPath(name)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		PrintError(fmt.Errorf("failed to delete profile %q: %v", name, err))
+		return
+	}
+	os.Remove(path + "-wal")
+	os.Remove(path + "-shm")
+	active := config.Config.General.Profile
+	if active == "" {
+		active = "default"
+	}
+	if name == active {
+		config.Config.General.Profile = ""
+		config.SaveGeneralKeys(map[string]string{"profile": ""})
+	}
 }
 
 // showNewProfileInput asks for a new profile name and switches to it,
