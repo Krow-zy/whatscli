@@ -922,7 +922,7 @@ func PrintCommands() {
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"disconnect[::-] = Close the connection")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"logout[::-] = Remove login data from computer")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"reset[::-] = Remove stored session and reconnect cleanly")
-	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"profile[::-] = List profiles; "+cmdPrefix+"profile [name[] = switch account session")
+	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"profile[::-] = list; "+cmdPrefix+"profile [name[] = switch; "+cmdPrefix+"profile remove [name[] = delete local session")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"passphrase[::-] = Set/change lock passphrase; "+cmdPrefix+"passphrase remove[::-] = disable")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"quit [::-]or[::b] "+config.Config.Keymap.CommandQuit+"[::-] = Exit app")
 	fmt.Fprintln(textView, "[::b] "+cmdPrefix+"notifications[::-] = toggle desktop notifications on/off (saved to config)")

@@ -67,3 +67,24 @@ func TestProfileDefaultAlias(t *testing.T) {
 		t.Fatalf("named profile must resolve to session.kantor")
 	}
 }
+
+// ProfileDbPath must resolve each profile to its session DB file without
+// mutating the global Profile field (callers read it concurrently).
+func TestProfileDbPath(t *testing.T) {
+	orig := Config.General.Profile
+	defer func() { Config.General.Profile = orig }()
+	Config.General.Profile = "kantor"
+
+	if got := ProfileDbPath("default"); !strings.HasSuffix(got, "session.db") || strings.Contains(got, "session.default") {
+		t.Fatalf("default must map to session.db, got %q", got)
+	}
+	if got := ProfileDbPath(""); !strings.HasSuffix(got, "session.db") {
+		t.Fatalf("empty must map to session.db, got %q", got)
+	}
+	if got := ProfileDbPath("kantor"); !strings.HasSuffix(got, "session.kantor.db") {
+		t.Fatalf("named profile must map to session.kantor.db, got %q", got)
+	}
+	if Config.General.Profile != "kantor" {
+		t.Fatalf("ProfileDbPath must not mutate the global Profile, got %q", Config.General.Profile)
+	}
+}

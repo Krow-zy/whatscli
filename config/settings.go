@@ -200,6 +200,15 @@ func GetSessionFilePath() string {
 	return GetHomeDir() + "." + name
 }
 
+// ProfileDbPath returns the session DB file path for the given profile name
+// ("default" and "" map to the unnamed session.db).
+func ProfileDbPath(name string) string {
+	if name == "" || name == "default" {
+		return filepath.Join(filepath.Dir(GetSessionFilePath()), "session.db")
+	}
+	return filepath.Join(filepath.Dir(GetSessionFilePath()), "session."+name+".db")
+}
+
 // AvailableProfiles lists the profile names that have a stored session DB,
 // derived from the session*.db files in the config directory. The unnamed
 // profile is reported as "default".

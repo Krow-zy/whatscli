@@ -195,6 +195,7 @@ func (sm *SessionManager) loginWithConnection(client *whatsmeow.Client) error {
 		return fmt.Errorf("connection failed: %v", err)
 	}
 
+	sm.saveActiveProfile()
 	sm.uiHandler.PrintText("Session restored successfully")
 	sm.StatusChannel <- StatusMsg{true, nil}
 	go sm.loadRecentChats()
@@ -218,6 +219,7 @@ func (sm *SessionManager) loginWithQRCode(client *whatsmeow.Client) error {
 			terminal.SetOutput(tview.ANSIWriter(sm.uiHandler.GetWriter()))
 			terminal.Get(evt.Code).Print()
 		case "success":
+			sm.saveActiveProfile()
 			sm.uiHandler.PrintText("Successfully logged in!")
 			sm.StatusChannel <- StatusMsg{true, nil}
 			go sm.loadRecentChats()
@@ -584,7 +586,11 @@ func (sm *SessionManager) resetSession() {
 	sm.uiHandler.PrintText("Session reset. Use /connect to reconnect with a new QR code.")
 }
 
-// profileCommand lists profiles or switches to another saved session profile.
+// profileCommand lists profiles, switches, or removes one:
+//
+//	/profile              list
+//	/profile <name>       switch
+//	/profile remove <name>  delete the stored session DB of that profile
 func (sm *SessionManager) profileCommand(params []string) {
 	if len(params) == 0 {
 		current := config.Config.General.Profile
@@ -594,8 +600,20 @@ func (sm *SessionManager) profileCommand(params []string) {
 		sm.uiHandler.PrintText("Active profile: " + current)
 		sm.uiHandler.PrintText("Available profiles:")
 		for _, name := range config.AvailableProfiles() {
-			sm.uiHandler.PrintText("  - " + name)
+			marker := " "
+			if name == current {
+				marker = "*"
+			}
+			sm.uiHandler.PrintText("  " + marker + " " + name)
 		}
+		return
+	}
+	if params[0] == "remove" {
+		if len(params) < 2 {
+			sm.printCommandUsage("profile remove", "<name>")
+			return
+		}
+		sm.removeProfile(params[1])
 		return
 	}
 	name := params[0]
@@ -606,8 +624,61 @@ func (sm *SessionManager) profileCommand(params []string) {
 	sm.switchProfile(name)
 }
 
-// switchProfile tears down the current connection and switches to another profile.
+// removeProfile deletes the stored session DB of a non-active profile.
+// Logging out on the server (unlinking the device) must be done separately
+// with /logout while that profile is active — this only removes the local copy.
+func (sm *SessionManager) removeProfile(name string) {
+	if !config.ValidProfileName(name) {
+		sm.uiHandler.PrintError(fmt.Errorf("invalid profile name %q (allowed: letters, digits, _ and -)", name))
+		return
+	}
+	current := config.Config.General.Profile
+	if current == "" {
+		current = "default"
+	}
+	if name == current {
+		sm.uiHandler.PrintError(fmt.Errorf("cannot remove the active profile %q — switch to another profile first", name))
+		return
+	}
+	path := config.ProfileDbPath(name)
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			sm.uiHandler.PrintError(fmt.Errorf("profile %q has no stored session", name))
+		} else {
+			sm.uiHandler.PrintError(fmt.Errorf("failed to remove profile %q: %v", name, err))
+		}
+		return
+	}
+	sm.uiHandler.PrintText(fmt.Sprintf("Profile %q removed (local session file deleted)", name))
+}
+
+// switchProfile tears down the current connection and switches to another
+// profile, restoring its session or showing the QR flow. The profile name is
+// persisted to the config only after a successful login (see
+// loginWithQRCode/loginWithConnection), so abandoning a new-profile QR does
+// not strand the user on an empty profile.
 func (sm *SessionManager) switchProfile(name string) {
+	sm.teardownProfile()
+	config.Config.General.Profile = name
+
+	sm.uiHandler.PrintText(fmt.Sprintf("Switched to profile %q", name))
+	if err := sm.login(); err != nil {
+		sm.uiHandler.PrintError(fmt.Errorf("WhatsApp connection failed: %v", err))
+		sm.uiHandler.PrintText("Try using /reset to completely reset the connection")
+	} else {
+		sm.uiHandler.PrintText("Successfully connected to WhatsApp")
+	}
+}
+
+// saveActiveProfile persists the current in-memory profile name to config.
+// Called once a session for it is confirmed usable.
+func (sm *SessionManager) saveActiveProfile() {
+	config.SaveGeneralKeys(map[string]string{"profile": config.Config.General.Profile})
+}
+
+// teardownProfile disconnects and resets all per-profile state. The config
+// Profile field is left untouched; callers set it.
+func (sm *SessionManager) teardownProfile() {
 	if sm.client != nil {
 		if sm.client.IsConnected() {
 			sm.client.Disconnect()
@@ -624,17 +695,6 @@ func (sm *SessionManager) switchProfile(name string) {
 	sm.currentReceiver = ""
 	sm.statusInfo.ContactPresence = ""
 	sm.uiHandler.ResetChat()
-
-	config.Config.General.Profile = name
-	config.SaveGeneralKeys(map[string]string{"profile": name})
-
-	sm.uiHandler.PrintText(fmt.Sprintf("Switched to profile %q", name))
-	if err := sm.login(); err != nil {
-		sm.uiHandler.PrintError(fmt.Errorf("WhatsApp connection failed: %v", err))
-		sm.uiHandler.PrintText("Try using /reset to completely reset the connection")
-	} else {
-		sm.uiHandler.PrintText("Successfully connected to WhatsApp")
-	}
 }
 
 func (sm *SessionManager) markCurrentChatRead() {
