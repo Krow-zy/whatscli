@@ -398,10 +398,15 @@ func showPassphraseDialog(remove bool) {
 func showAccountPicker(notice string) {
 	profiles := config.AvailableProfiles()
 	if len(profiles) <= 1 {
-		// nothing meaningful to pick — straight into the UI
+		// nothing meaningful to pick — straight into the UI. With the gate
+		// owning boot nothing is connected yet, so log into the single
+		// remaining profile directly (also repairs a stale config pointer).
 		uiGate = false
 		app.SetRoot(gridLayout, true)
 		app.SetFocus(textInput)
+		if len(profiles) == 1 {
+			sessionManager.CommandChannel <- messages.Command{Name: "profile", Params: []string{profiles[0]}}
+		}
 		return
 	}
 
