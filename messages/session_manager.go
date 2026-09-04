@@ -502,26 +502,18 @@ func (sm *SessionManager) backlogAccepts(chatID string) bool {
 // never discarded by /backlog — each call only ADDS messages; a later call
 // with a larger window pages deeper, one with a smaller window is a no-op
 // when the local history already reaches past it. Without a parameter one
-// batch of 50 messages is requested.
+// batch of 50 messages is requested. With no chat open it bulk-loads the
+// most recent sidebar chats instead of failing (see loadBacklogRecent).
 func (sm *SessionManager) loadBacklog(params []string) {
-	if sm.currentReceiver == "" {
-		sm.printCommandUsage("backlog", "[minutes] -> only works in a chat")
-		return
-	}
 	if sm.client == nil || !sm.client.IsConnected() {
 		sm.uiHandler.PrintError(errors.New("not connected to WhatsApp"))
-		return
-	}
-
-	jid, err := types.ParseJID(sm.currentReceiver)
-	if err != nil {
-		sm.uiHandler.PrintError(fmt.Errorf("invalid JID: %v", err))
 		return
 	}
 
 	// /backlog <minutes> bounds the fetch; without an argument the
 	// history_window_min config value applies (0 = plain one-batch mode).
 	windowMinutes := config.Config.General.HistoryWindowMin
+	var err error
 	if len(params) > 0 {
 		windowMinutes, err = strconv.ParseInt(params[0], 10, 64)
 		if err != nil || windowMinutes < 0 {
@@ -530,16 +522,11 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		}
 	}
 
-	// If the local history already reaches past the requested window,
-	// there is nothing to fetch — report it instead of a pointless
-	// round-trip that would end in "No additional messages found".
-	if windowMinutes > 0 {
-		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
-		if oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver); ok && int64(oldest.Timestamp) <= cutoff.Unix() {
-			sm.uiHandler.PrintText(fmt.Sprintf("History for the last %d minute(s) is already loaded.", windowMinutes))
-			sm.uiHandler.NewScreen(sm.db.GetMessages(sm.currentReceiver))
-			return
-		}
+	// No chat open: WhatsApp's on-demand sync is per-conversation, so
+	// instead of failing, page through the most recent sidebar chats.
+	if sm.currentReceiver == "" {
+		sm.loadBacklogRecent(windowMinutes)
+		return
 	}
 
 	if windowMinutes > 0 {
@@ -547,22 +534,48 @@ func (sm *SessionManager) loadBacklog(params []string) {
 	} else {
 		sm.uiHandler.PrintText("Retrieving message history...")
 	}
+	loaded, covered := sm.fetchBacklog(sm.currentReceiver, windowMinutes)
+	switch {
+	case loaded > 0:
+		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d additional messages", loaded))
+	case covered:
+		sm.uiHandler.PrintText(fmt.Sprintf("History for the last %d minute(s) is already loaded.", windowMinutes))
+	case windowMinutes > 0:
+		sm.uiHandler.PrintText("No additional messages found. WhatsApp may limit history access.")
+	}
+	sm.uiHandler.NewScreen(sm.db.GetMessages(sm.currentReceiver))
+}
+
+// fetchBacklog pages on-demand history for one chat until the requested
+// window is covered (windowMinutes <= 0 = a single 50-message batch). It
+// returns the number of newly ingested messages and whether the window was
+// already covered by the local history (so the caller can skip the pointless
+// round-trip report).
+func (sm *SessionManager) fetchBacklog(chatID string, windowMinutes int64) (loaded int, alreadyCovered bool) {
+	jid, err := types.ParseJID(chatID)
+	if err != nil {
+		return 0, false
+	}
+	if windowMinutes > 0 {
+		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
+		if oldest, ok := sm.db.GetOldestMessage(chatID); ok && int64(oldest.Timestamp) <= cutoff.Unix() {
+			return 0, true
+		}
+	}
 
 	// The on-demand protocol fetches a fixed number of messages before an
 	// anchor message. With no local anchor (clean session) send an empty
 	// anchor so the phone returns the newest messages.
 	deadline := time.Now().Add(120 * time.Second)
-	loadedTotal := 0
-	sm.beginBacklogFetch(sm.currentReceiver)
 	for {
-		before := len(sm.db.GetMessages(sm.currentReceiver))
+		before := len(sm.db.GetMessages(chatID))
 		anchor := types.MessageInfo{
 			MessageSource: types.MessageSource{
 				Chat:    jid,
-				IsGroup: strings.Contains(sm.currentReceiver, GROUPSUFFIX),
+				IsGroup: strings.Contains(chatID, GROUPSUFFIX),
 			},
 		}
-		if oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver); ok {
+		if oldest, ok := sm.db.GetOldestMessage(chatID); ok {
 			anchor.ID = types.MessageID(oldest.Id)
 			anchor.IsFromMe = oldest.FromMe
 			anchor.Timestamp = time.Unix(int64(oldest.Timestamp), 0)
@@ -576,7 +589,7 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		}
 		// Refresh the ingest window right before sending so the response
 		// (and a trailing chunk) can land within it.
-		sm.beginBacklogFetch(sm.currentReceiver)
+		sm.beginBacklogFetch(chatID)
 		req := sm.client.BuildHistorySyncRequest(&anchor, 50)
 		if _, err := sm.client.SendPeerMessage(context.Background(), req); err != nil {
 			sm.uiHandler.PrintError(fmt.Errorf("failed to request message history: %v", err))
@@ -584,24 +597,21 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		}
 
 		wait := time.Now().Add(15 * time.Second)
-		for len(sm.db.GetMessages(sm.currentReceiver)) == before && time.Now().Before(wait) {
+		for len(sm.db.GetMessages(chatID)) == before && time.Now().Before(wait) {
 			time.Sleep(250 * time.Millisecond)
 		}
-		got := len(sm.db.GetMessages(sm.currentReceiver)) - before
+		got := len(sm.db.GetMessages(chatID)) - before
 		if got <= 0 {
-			if loadedTotal == 0 {
-				sm.uiHandler.PrintText("No additional messages found. WhatsApp may limit history access.")
-			}
 			break
 		}
-		loadedTotal += got
+		loaded += got
 
 		if windowMinutes <= 0 {
-			// plain /backlog: one batch, like before
+			// plain /backlog: one batch
 			break
 		}
 		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
-		if oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver); !ok || int64(oldest.Timestamp) <= cutoff.Unix() {
+		if oldest, ok := sm.db.GetOldestMessage(chatID); !ok || int64(oldest.Timestamp) <= cutoff.Unix() {
 			// reached past the requested window
 			break
 		}
@@ -610,12 +620,35 @@ func (sm *SessionManager) loadBacklog(params []string) {
 			break
 		}
 	}
+	return loaded, false
+}
 
-	updated := sm.db.GetMessages(sm.currentReceiver)
-	if loadedTotal > 0 {
-		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d additional messages", loadedTotal))
+// loadBacklogRecent is /backlog's bulk mode: with no chat open it fetches
+// one window for each of the most recent sidebar chats (GetKnownChats is
+// recency-sorted). The manager goroutine is busy for the duration, so the
+// cap keeps the worst case bounded.
+func (sm *SessionManager) loadBacklogRecent(windowMinutes int64) {
+	chats := sm.GetKnownChats()
+	if len(chats) == 0 {
+		sm.uiHandler.PrintText("No chats in the sidebar yet — wait for the chat list to load, or open a chat and run /backlog.")
+		return
 	}
-	sm.uiHandler.NewScreen(updated)
+	// ponytail: cap 10 chats/request; raise or make configurable if users
+	// want deeper bulk loads.
+	const backlogAllChats = 10
+	if len(chats) > backlogAllChats {
+		chats = chats[:backlogAllChats]
+	}
+	sm.uiHandler.PrintText(fmt.Sprintf("No chat open: loading history for the %d most recent chats...", len(chats)))
+	total := 0
+	for _, chat := range chats {
+		n, _ := sm.fetchBacklog(chat.Id, windowMinutes)
+		total += n
+	}
+	sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d messages across %d chats. Open a chat to read them.", total, len(chats)))
+	if sm.currentReceiver != "" {
+		sm.uiHandler.NewScreen(sm.db.GetMessages(sm.currentReceiver))
+	}
 }
 
 func (sm *SessionManager) resetSession() {
