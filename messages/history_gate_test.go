@@ -60,6 +60,9 @@ func TestHistorySyncGateDropsAutoPushChunks(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sm.db.Init()
+			// /backlog must be in flight for the chunk's chat, or even an
+			// ON_DEMAND chunk is metadata-only.
+			sm.beginBacklogFetch("120363@g.us")
 			evt := makeTestHistorySyncEvent(int32(tc.syncType), conv)
 			eh.handleHistorySync(evt)
 			if got := len(sm.db.GetMessages("120363@g.us")); got != tc.wantMsgs {
@@ -69,6 +72,49 @@ func TestHistorySyncGateDropsAutoPushChunks(t *testing.T) {
 				t.Fatalf("chats = %d, want >= %d (metadata must survive the gate)", got, tc.wantChats)
 			}
 		})
+	}
+}
+
+// An ON_DEMAND chunk must only ingest messages for the chat the in-flight
+// /backlog fetch asked about; other conversations in the same chunk stay
+// metadata-only, and an expired fetch window ingests nothing.
+func TestOnDemandIngestScopedToFetchTarget(t *testing.T) {
+	sm := &SessionManager{}
+	sm.db = &MessageDatabase{}
+	sm.db.Init()
+	sm.uiHandler = gateStubHandler{}
+	container, err := sqlstore.New(context.Background(), "sqlite", "file:scope_test?mode=memory&cache=shared&_pragma=foreign_keys(1)", waLog.Noop)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	deviceStore, err := container.GetFirstDevice(context.Background())
+	if err != nil {
+		t.Fatalf("device: %v", err)
+	}
+	sm.client = whatsmeow.NewClient(deviceStore, waLog.Noop)
+	eh := &eventHandler{sm: sm}
+	conv := makeTestConversation() // chat 120363@g.us
+
+	// Fetch in flight for a DIFFERENT chat: chunk is metadata-only.
+	sm.db.Init()
+	sm.beginBacklogFetch("other@s.whatsapp.net")
+	eh.handleHistorySync(makeTestHistorySyncEvent(6, conv))
+	if got := len(sm.db.GetMessages("120363@g.us")); got != 0 {
+		t.Fatalf("off-target chunk ingested %d messages, want 0", got)
+	}
+	if _, ok := sm.db.GetChat("120363@g.us"); !ok {
+		t.Fatal("metadata must still be imported for off-target conversations")
+	}
+
+	// Fetch window expired: nothing is ingested.
+	sm.db.Init()
+	sm.beginBacklogFetch("120363@g.us")
+	sm.backlogLock.Lock()
+	sm.backlogUntil = time.Now().Add(-time.Second)
+	sm.backlogLock.Unlock()
+	eh.handleHistorySync(makeTestHistorySyncEvent(6, conv))
+	if got := len(sm.db.GetMessages("120363@g.us")); got != 0 {
+		t.Fatalf("expired-window chunk ingested %d messages, want 0", got)
 	}
 }
 

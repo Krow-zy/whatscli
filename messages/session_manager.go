@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -50,6 +51,11 @@ type SessionManager struct {
 	lastSent         time.Time
 	started          bool
 	eventHandler     *eventHandler
+	// backlogLock guards the /backlog ingest window: the manager goroutine
+	// opens/refreshes it, whatsmeow's event goroutine reads it.
+	backlogLock   sync.Mutex
+	backlogTarget string
+	backlogUntil  time.Time
 }
 
 // Init initializes the SessionManager.
@@ -469,10 +475,34 @@ func (sm *SessionManager) execCommand(command Command) {
 	}
 }
 
+// beginBacklogFetch marks chat as the target of an in-flight /backlog fetch
+// and opens a 25s ingest window (15s batch wait + grace), refreshed on every
+// batch request. ON_DEMAND chunks are only imported for this chat while the
+// window is open: the server can push ON_DEMAND data spontaneously, and a
+// chunk may carry conversations besides the one we asked about.
+func (sm *SessionManager) beginBacklogFetch(chat string) {
+	sm.backlogLock.Lock()
+	sm.backlogTarget = chat
+	sm.backlogUntil = time.Now().Add(25 * time.Second)
+	sm.backlogLock.Unlock()
+}
+
+// backlogAccepts reports whether messages from an ON_DEMAND chunk for chatID
+// may be ingested right now — only during an in-flight fetch for exactly
+// that chat.
+func (sm *SessionManager) backlogAccepts(chatID string) bool {
+	sm.backlogLock.Lock()
+	defer sm.backlogLock.Unlock()
+	return sm.backlogTarget != "" && chatID == sm.backlogTarget && time.Now().Before(sm.backlogUntil)
+}
+
 // loadBacklog requests chat history older than the oldest locally stored
-// message from the phone. An optional minutes parameter bounds the request:
-// messages older than that window are discarded after ingestion. Without a
-// parameter one batch of BacklogMsgQuantity messages is requested.
+// message from the phone. An optional minutes parameter bounds the fetch:
+// batches are requested until the requested window is covered. History is
+// never discarded by /backlog — each call only ADDS messages; a later call
+// with a larger window pages deeper, one with a smaller window is a no-op
+// when the local history already reaches past it. Without a parameter one
+// batch of 50 messages is requested.
 func (sm *SessionManager) loadBacklog(params []string) {
 	if sm.currentReceiver == "" {
 		sm.printCommandUsage("backlog", "[minutes] -> only works in a chat")
@@ -500,6 +530,18 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		}
 	}
 
+	// If the local history already reaches past the requested window,
+	// there is nothing to fetch — report it instead of a pointless
+	// round-trip that would end in "No additional messages found".
+	if windowMinutes > 0 {
+		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
+		if oldest, ok := sm.db.GetOldestMessage(sm.currentReceiver); ok && int64(oldest.Timestamp) <= cutoff.Unix() {
+			sm.uiHandler.PrintText(fmt.Sprintf("History for the last %d minute(s) is already loaded.", windowMinutes))
+			sm.uiHandler.NewScreen(sm.db.GetMessages(sm.currentReceiver))
+			return
+		}
+	}
+
 	if windowMinutes > 0 {
 		sm.uiHandler.PrintText(fmt.Sprintf("Retrieving message history for the last %d minute(s)...", windowMinutes))
 	} else {
@@ -509,8 +551,9 @@ func (sm *SessionManager) loadBacklog(params []string) {
 	// The on-demand protocol fetches a fixed number of messages before an
 	// anchor message. With no local anchor (clean session) send an empty
 	// anchor so the phone returns the newest messages.
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(120 * time.Second)
 	loadedTotal := 0
+	sm.beginBacklogFetch(sm.currentReceiver)
 	for {
 		before := len(sm.db.GetMessages(sm.currentReceiver))
 		anchor := types.MessageInfo{
@@ -531,13 +574,16 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		} else {
 			anchor.Timestamp = time.Now()
 		}
+		// Refresh the ingest window right before sending so the response
+		// (and a trailing chunk) can land within it.
+		sm.beginBacklogFetch(sm.currentReceiver)
 		req := sm.client.BuildHistorySyncRequest(&anchor, 50)
 		if _, err := sm.client.SendPeerMessage(context.Background(), req); err != nil {
 			sm.uiHandler.PrintError(fmt.Errorf("failed to request message history: %v", err))
 			break
 		}
 
-		wait := time.Now().Add(5 * time.Second)
+		wait := time.Now().Add(15 * time.Second)
 		for len(sm.db.GetMessages(sm.currentReceiver)) == before && time.Now().Before(wait) {
 			time.Sleep(250 * time.Millisecond)
 		}
@@ -565,16 +611,9 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		}
 	}
 
-	if windowMinutes > 0 {
-		cutoff := time.Now().Add(-time.Duration(windowMinutes) * time.Minute)
-		sm.db.TrimMessagesBefore(sm.currentReceiver, cutoff.Unix())
-	}
-
 	updated := sm.db.GetMessages(sm.currentReceiver)
 	if loadedTotal > 0 {
 		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d additional messages", loadedTotal))
-	} else if windowMinutes > 0 {
-		sm.uiHandler.PrintText("No additional messages found. WhatsApp may limit history access.")
 	}
 	sm.uiHandler.NewScreen(updated)
 }
@@ -688,17 +727,22 @@ func (sm *SessionManager) deleteProfile(params []string) {
 		sm.sendDeleteResult(name, fmt.Errorf("invalid profile name %q (allowed: letters, digits, _ and -)", name))
 		return
 	}
-	// Release the DB handle the manager holds for the active profile so
-	// os.Remove can succeed on Windows. Safe here: manager goroutine.
-	sm.teardownProfile()
+	active := config.Config.General.Profile
+	if active == "" {
+		active = "default"
+	}
+	// Only the ACTIVE profile's DB handle is held open by the manager, so
+	// only tearing it down is needed to unlock the file. Deleting a
+	// non-active profile must not kill a live connection.
+	if name == active {
+		sm.teardownProfile()
+	}
 	err := config.RemoveProfileDb(name)
-	if err == nil {
-		// Only clear the pointer once the file is really gone, so a failed
+	if err == nil && name == active {
+		// Clear the pointer once the file is really gone, so a failed
 		// removal never leaves the config pointing at a deleted DB.
-		if p := config.Config.General.Profile; p == name || (p == "" && name == "default") {
-			config.Config.General.Profile = ""
-			config.SaveGeneralKeys(map[string]string{"profile": ""})
-		}
+		config.Config.General.Profile = ""
+		config.SaveGeneralKeys(map[string]string{"profile": ""})
 	}
 	sm.sendDeleteResult(name, err)
 }
@@ -1320,8 +1364,17 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 		eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 		return
 	}
+	touched := false
 	for _, conv := range evt.Data.GetConversations() {
 		eh.importChatMetadata(conv)
+		// Only ingest messages for the chat an in-flight /backlog fetch
+		// asked about. The server can push ON_DEMAND chunks spontaneously
+		// and a chunk may carry other conversations; importing those would
+		// load history nobody requested.
+		if !eh.sm.backlogAccepts(conv.GetID()) {
+			continue
+		}
+		touched = true
 
 		for _, histMsg := range conv.GetMessages() {
 			webMsg := histMsg.GetMessage()
@@ -1351,7 +1404,9 @@ func (eh *eventHandler) handleHistorySync(evt *events.HistorySync) {
 	}
 
 	eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
-	if eh.sm.currentReceiver != "" {
+	// Re-render only when this chunk actually touched the open chat —
+	// otherwise a late chunk for another chat swaps the transcript.
+	if touched && eh.sm.currentReceiver != "" {
 		eh.sm.uiHandler.NewScreen(eh.sm.getMessages(eh.sm.currentReceiver))
 	}
 }
