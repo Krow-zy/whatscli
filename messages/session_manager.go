@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -32,6 +33,9 @@ import (
 )
 
 var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
+
+// staleMessageGrace tolerates phone/laptop clock skew when gating offline messages.
+const staleMessageGrace = 5 * time.Minute
 
 // SessionManager deals with the connection and receives commands from the UI.
 type SessionManager struct {
@@ -56,6 +60,10 @@ type SessionManager struct {
 	backlogLock   sync.Mutex
 	backlogTarget string
 	backlogUntil  time.Time
+	// sessionStart tracks real login time (unix seconds) for stale-message
+	// gating: written on the manager goroutine at login, read on whatsmeow's
+	// event goroutine, hence atomic.
+	sessionStart atomic.Int64
 }
 
 // Init initializes the SessionManager.
@@ -213,6 +221,7 @@ func (sm *SessionManager) loginWithConnection(client *whatsmeow.Client) error {
 	sm.saveActiveProfile()
 	sm.uiHandler.PrintText("Session restored successfully")
 	sm.StatusChannel <- StatusMsg{true, nil}
+	sm.sessionStart.Store(time.Now().Unix())
 	go sm.loadRecentChats()
 	return nil
 }
@@ -237,6 +246,7 @@ func (sm *SessionManager) loginWithQRCode(client *whatsmeow.Client) error {
 			sm.saveActiveProfile()
 			sm.uiHandler.PrintText("Successfully logged in!")
 			sm.StatusChannel <- StatusMsg{true, nil}
+			sm.sessionStart.Store(time.Now().Unix())
 			go sm.loadRecentChats()
 			return nil
 		default:
@@ -1346,6 +1356,17 @@ func (eh *eventHandler) handlePresenceEvent(evt *events.Presence) {
 	eh.sm.uiHandler.SetStatus(eh.sm.statusInfo)
 }
 
+// isStaleMessage reports whether msg predates this login session (unix
+// seconds, atomic for the manager/event goroutine split). Zero start means
+// unset — fail open toward visibility.
+func (sm *SessionManager) isStaleMessage(msg Message) bool {
+	start := sm.sessionStart.Load()
+	if start == 0 {
+		return false
+	}
+	return int64(msg.Timestamp) < start-int64(staleMessageGrace/time.Second)
+}
+
 func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 	msg, action, ok := eh.normalizeEventMessage(evt)
 	if !ok {
@@ -1360,6 +1381,15 @@ func (eh *eventHandler) handleLiveMessage(evt *events.Message) {
 		eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 		return
 	case "ignore":
+		return
+	}
+
+	// Gate stale offline messages: bump sidebar unread only, skip transcript.
+	if eh.sm.isStaleMessage(msg) {
+		if !msg.FromMe {
+			eh.sm.db.BumpChatUnread(msg.ChatId)
+		}
+		eh.sm.uiHandler.SetChats(eh.sm.GetKnownChats())
 		return
 	}
 

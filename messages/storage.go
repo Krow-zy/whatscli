@@ -201,6 +201,18 @@ func (md *MessageDatabase) GetChat(chatID string) (Chat, bool) {
 	return chat, ok
 }
 
+// BumpChatUnread increments the unread counter for a chat without storing a message.
+func (md *MessageDatabase) BumpChatUnread(chatID string) {
+	md.chatLock.Lock()
+	defer md.chatLock.Unlock()
+	chat, ok := md.chats[chatID]
+	if !ok {
+		return
+	}
+	chat.Unread++
+	md.chats[chatID] = chat
+}
+
 // UpdateChatUnread syncs unread counts from external sources such as history sync.
 func (md *MessageDatabase) UpdateChatUnread(chatID string, unread int) {
 	md.messageLock.Lock()
