@@ -25,14 +25,14 @@ func (stubHandler) SetStatus(SessionStatus)         {}
 func (stubHandler) OpenFile(string)                 {}
 func (stubHandler) GetWriter() io.Writer            { return io.Discard }
 
-func newLiveEvent(chatJID string, ts time.Time, text string) *events.Message {
+func newLiveEvent(chatJID string, ts time.Time, text string, fromMe bool) *events.Message {
 	jid, _ := types.ParseJID(chatJID)
 	return &events.Message{
 		Info: types.MessageInfo{
 			MessageSource: types.MessageSource{
 				Chat:     jid,
 				Sender:   jid,
-				IsFromMe: false,
+				IsFromMe: fromMe,
 				IsGroup:  false,
 			},
 			ID:        types.MessageID("test-msg-" + ts.Format("0102150405")),
@@ -59,7 +59,7 @@ func TestStaleMessageSkipsTranscriptAndBumpsUnread(t *testing.T) {
 	// Add an existing chat with 0 unread.
 	sm.db.AddChat(Chat{Id: chatID, Name: "Alice"})
 
-	evt := newLiveEvent(chatID, now.Add(-2*time.Hour), "old message")
+	evt := newLiveEvent(chatID, now.Add(-2*time.Hour), "old message", false)
 	eh := &eventHandler{sm: sm}
 	eh.handleLiveMessage(evt)
 
@@ -79,12 +79,39 @@ func TestStaleMessageSkipsTranscriptAndBumpsUnread(t *testing.T) {
 	}
 }
 
+func TestStaleFromMeDoesNotBumpUnread(t *testing.T) {
+	now := time.Now()
+	sm := setupSM(now)
+	chatID := "555@s.whatsapp.net"
+
+	sm.db.AddChat(Chat{Id: chatID, Name: "Bob"})
+
+	evt := newLiveEvent(chatID, now.Add(-2*time.Hour), "old outgoing", true)
+	eh := &eventHandler{sm: sm}
+	eh.handleLiveMessage(evt)
+
+	// Stale FromMe message must not be stored.
+	msgs := sm.db.GetMessages(chatID)
+	if len(msgs) != 0 {
+		t.Fatalf("stale FromMe message should not be stored, got %d messages", len(msgs))
+	}
+
+	// Unread must NOT be bumped.
+	chat, ok := sm.db.GetChat(chatID)
+	if !ok {
+		t.Fatal("chat should exist")
+	}
+	if chat.Unread != 0 {
+		t.Fatalf("expected unread 0 for stale FromMe, got %d", chat.Unread)
+	}
+}
+
 func TestFreshMessageIsIngested(t *testing.T) {
 	now := time.Now()
 	sm := setupSM(now)
 	chatID := "222@s.whatsapp.net"
 
-	evt := newLiveEvent(chatID, now, "fresh message")
+	evt := newLiveEvent(chatID, now, "fresh message", false)
 	eh := &eventHandler{sm: sm}
 	eh.handleLiveMessage(evt)
 
@@ -102,7 +129,7 @@ func TestWithinGraceMessageIsIngested(t *testing.T) {
 	sm := setupSM(now)
 	chatID := "333@s.whatsapp.net"
 
-	evt := newLiveEvent(chatID, now.Add(-3*time.Minute), "grace message")
+	evt := newLiveEvent(chatID, now.Add(-3*time.Minute), "grace message", false)
 	eh := &eventHandler{sm: sm}
 	eh.handleLiveMessage(evt)
 
@@ -113,10 +140,12 @@ func TestWithinGraceMessageIsIngested(t *testing.T) {
 }
 
 func TestZeroSessionStartIsIngested(t *testing.T) {
-	sm := setupSM(time.Time{}) // zero value
+	sm := &SessionManager{}
+	sm.Init(&stubHandler{})
+	// sessionStart defaults to zero-value atomic.Int64 (0 = fail-open)
 	chatID := "444@s.whatsapp.net"
 
-	evt := newLiveEvent(chatID, time.Now().Add(-1*time.Hour), "old but open")
+	evt := newLiveEvent(chatID, time.Now().Add(-1*time.Hour), "old but open", false)
 	eh := &eventHandler{sm: sm}
 	eh.handleLiveMessage(evt)
 

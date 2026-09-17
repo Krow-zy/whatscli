@@ -202,6 +202,7 @@ func (md *MessageDatabase) GetChat(chatID string) (Chat, bool) {
 }
 
 // BumpChatUnread increments the unread counter for a chat without storing a message.
+// It is a no-op if chatID is not found in the database.
 func (md *MessageDatabase) BumpChatUnread(chatID string) {
 	md.chatLock.Lock()
 	defer md.chatLock.Unlock()
