@@ -1,8 +1,16 @@
 .DS_Store
 whatscli
 whatscli.exe
+whatscli-dbg.exe
 run.log
 graphify-out/
 payloads/
 mitm_mcp_traffic.db
 kimi-export-session_*.md
+# Compiled windows resources (regenerate from icon.rc via windres)
+*.syso
+# Session notes and scratch
+codex-session-*.md
+.superpowers/
+# Git worktrees (contain builds, scratch, and per-worktree artifacts)
+.claude/worktrees/
