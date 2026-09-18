@@ -545,15 +545,21 @@ func (sm *SessionManager) loadBacklog(params []string) {
 		sm.uiHandler.PrintText("Retrieving message history...")
 	}
 	loaded, covered := sm.fetchBacklog(sm.currentReceiver, windowMinutes)
+	sm.reportBacklogResult(loaded, covered, windowMinutes)
+	sm.uiHandler.NewScreen(sm.db.GetMessages(sm.currentReceiver))
+}
+
+// reportBacklogResult prints the /backlog outcome line. The plain (no window)
+// zero-result case also reports instead of falling through in silence.
+func (sm *SessionManager) reportBacklogResult(loaded int, covered bool, windowMinutes int64) {
 	switch {
 	case loaded > 0:
 		sm.uiHandler.PrintText(fmt.Sprintf("Loaded %d additional messages", loaded))
 	case covered:
 		sm.uiHandler.PrintText(fmt.Sprintf("History for the last %d minute(s) is already loaded.", windowMinutes))
-	case windowMinutes > 0:
+	default:
 		sm.uiHandler.PrintText("No additional messages found. WhatsApp may limit history access.")
 	}
-	sm.uiHandler.NewScreen(sm.db.GetMessages(sm.currentReceiver))
 }
 
 // fetchBacklog pages on-demand history for one chat until the requested
@@ -564,6 +570,7 @@ func (sm *SessionManager) loadBacklog(params []string) {
 func (sm *SessionManager) fetchBacklog(chatID string, windowMinutes int64) (loaded int, alreadyCovered bool) {
 	jid, err := types.ParseJID(chatID)
 	if err != nil {
+		sm.uiHandler.PrintError(fmt.Errorf("invalid chat ID %q: %v", chatID, err))
 		return 0, false
 	}
 	if windowMinutes > 0 {
@@ -601,10 +608,15 @@ func (sm *SessionManager) fetchBacklog(chatID string, windowMinutes int64) (load
 		// (and a trailing chunk) can land within it.
 		sm.beginBacklogFetch(chatID)
 		req := sm.client.BuildHistorySyncRequest(&anchor, 50)
-		if _, err := sm.client.SendPeerMessage(context.Background(), req); err != nil {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		resp, err := sm.client.SendPeerMessage(sendCtx, req)
+		cancel()
+		sm.uiHandler.PrintText(fmt.Sprintf("[dbg] req sent id=%q ts=%d err=%v", anchor.ID, anchor.Timestamp.Unix(), err))
+		if err != nil {
 			sm.uiHandler.PrintError(fmt.Errorf("failed to request message history: %v", err))
 			break
 		}
+		_ = resp
 
 		wait := time.Now().Add(15 * time.Second)
 		for len(sm.db.GetMessages(chatID)) == before && time.Now().Before(wait) {
