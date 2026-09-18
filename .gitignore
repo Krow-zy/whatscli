@@ -14,3 +14,9 @@ codex-session-*.md
 .superpowers/
 # Git worktrees (contain builds, scratch, and per-worktree artifacts)
 .claude/worktrees/
+# Internal working docs — never publish (agent instructions, security notes)
+AGENTS.md
+Bug-Found.md
+# whatscli runtime data (session DBs live next to config; never commit)
+whatscli.config
+session*.db*
